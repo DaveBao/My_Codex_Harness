@@ -6,7 +6,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,10 @@ AGENTS = {
         "role": "Librarian",
     },
 }
+PACKAGE_TEXT_SUFFIXES = frozenset({".json", ".md", ".py", ".toml", ".upstream", ".yaml"})
+RFC3339_DATETIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
+)
 
 
 def frontmatter(path: Path) -> dict[str, str]:
@@ -96,6 +102,40 @@ def agent_toml(path: Path) -> dict[str, str]:
     return values
 
 
+def tracked_package_text_files(root: Path) -> list[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", "skills", "agents", "schemas"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [
+        root / relative
+        for relative in result.stdout.split("\0")
+        if relative and Path(relative).suffix.lower() in PACKAGE_TEXT_SUFFIXES
+    ]
+
+
+def try_create_symlink(link: Path, target: Path) -> bool:
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError):
+        return False
+    return True
+
+
+def is_rfc3339_datetime(value: str) -> bool:
+    if RFC3339_DATETIME.fullmatch(value) is None:
+        return False
+    normalized = value[:10] + "T" + value[11:]
+    if normalized[-1:] in ("Z", "z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(normalized).tzinfo is not None
+    except ValueError:
+        return False
+
+
 def assert_schema_valid(test: unittest.TestCase, schema: dict, value: object) -> None:
     errors: list[str] = []
     validate_schema(schema, value, "$", errors)
@@ -124,8 +164,12 @@ def validate_schema(schema: dict, value: object, path: str, errors: list[str]) -
             return
     if isinstance(value, str) and len(value) < schema.get("minLength", 0):
         errors.append(f"{path}: minLength")
+    if isinstance(value, str) and len(value) > schema.get("maxLength", len(value)):
+        errors.append(f"{path}: maxLength")
     if isinstance(value, str) and "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
         errors.append(f"{path}: pattern")
+    if isinstance(value, str) and schema.get("format") == "date-time" and not is_rfc3339_datetime(value):
+        errors.append(f"{path}: format")
     if isinstance(value, int) and not isinstance(value, bool) and value < schema.get("minimum", value):
         errors.append(f"{path}: minimum")
     if isinstance(value, dict):
@@ -290,6 +334,7 @@ class SchemaContractTests(unittest.TestCase):
             {**value, "unexpected": True},
             {**value, "featureSpecSha256": "invalid"},
             {**value, "payload": {**value["payload"], "validation": {"command": "test", "status": "failed", "summary": "failed"}}},
+            {**value, "payload": {**value["payload"], "validation": {"command": "test", "status": "passed", "summary": "x" * 1001}}},
         ):
             with self.subTest(malformed=malformed):
                 assert_schema_invalid(self, schema, malformed)
@@ -308,6 +353,7 @@ class SchemaContractTests(unittest.TestCase):
             {**value, "unexpected": True},
             {**value, "durationMs": 1},
             {**value, "featureId": None, "featureName": "leaked identity"},
+            {**value, "timestamp": "not-a-timestamp"},
         ):
             with self.subTest(malformed=malformed):
                 assert_schema_invalid(self, schema, malformed)
@@ -457,17 +503,14 @@ class ContextHelperTests(unittest.TestCase):
         (self.root / "docs/exec-plans/active/TODO.json").write_text("not-json\n", encoding="utf-8")
         self.assert_failure(10, "MALFORMED_DATA", "feature", "--id", "F1")
 
-    def test_context_helper_rejects_relative_non_main_and_unsafe_roots(self):
+    def test_context_helper_rejects_relative_and_nonroot_roots(self):
         self.assert_failure(9, "UNSAFE_PATH", "feature", "--id", "F1", root=Path("relative"))
-        external = self.base / "external.json"
-        external.write_text(json.dumps({"features": [self.feature]}), encoding="utf-8")
-        todo = self.root / "docs/exec-plans/active/TODO.json"
-        todo.unlink()
-        todo.symlink_to(external)
-        self.assert_failure(9, "UNSAFE_PATH", "feature", "--id", "F1")
 
-        todo.unlink()
-        self.write_todo([self.feature])
+        nested = self.root / "nested"
+        nested.mkdir()
+        self.assert_failure(9, "UNSAFE_PATH", "feature", "--id", "F1", root=nested)
+
+    def test_context_helper_rejects_non_main_worktree(self):
         subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
         subprocess.run(
             ["git", "-C", str(self.root), "-c", "user.name=Harness Test", "-c", "user.email=harness@example.invalid", "commit", "-qm", "fixture"],
@@ -477,15 +520,47 @@ class ContextHelperTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.root), "worktree", "add", "-qb", "feature/F1", str(linked)], check=True)
         self.assert_failure(9, "UNSAFE_PATH", "feature", "--id", "F1", root=linked)
 
+    def test_context_helper_rejects_symlinked_control_file_when_supported(self):
+        external = self.base / "external.json"
+        external.write_text(json.dumps({"features": [self.feature]}), encoding="utf-8")
+        todo = self.root / "docs/exec-plans/active/TODO.json"
+        todo.unlink()
+        if not try_create_symlink(todo, external):
+            self.skipTest("symlink creation is unavailable")
+        self.assert_failure(9, "UNSAFE_PATH", "feature", "--id", "F1")
+
+    def test_symlink_permission_failure_is_a_capability_miss(self):
+        with mock.patch.object(Path, "symlink_to", side_effect=PermissionError("Windows privilege")):
+            self.assertFalse(try_create_symlink(self.base / "link", self.base / "target"))
+
 
 class ResidueTests(unittest.TestCase):
-    def test_new_contracts_have_no_source_repo_or_secret_residue(self):
-        paths = [ROOT / "skills" / name for name in SKILLS]
-        paths += [ROOT / "agents", ROOT / "schemas"]
-        files = [path for base in paths if base.exists() for path in base.rglob("*") if path.is_file()]
+    def assert_no_package_residue(self):
+        files = tracked_package_text_files(ROOT)
         text = "\n".join(path.read_text(encoding="utf-8") for path in files)
         self.assertNotIn("/Users/zhiqibao/Documents/SynologyDrive/01_Projects/harness_v2", text)
         self.assertNotRegex(text, r"(?i)(api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*['\"][^'\"]+")
+
+    def test_new_contracts_have_no_source_repo_or_secret_residue(self):
+        self.assert_no_package_residue()
+
+    def test_residue_scan_ignores_ignored_binary_files(self):
+        cache = ROOT / "skills/builder/__pycache__"
+        probe = cache / "probe.pyc"
+        cache.mkdir(exist_ok=True)
+        probe.write_bytes(b"\xff\xfeignored binary\x00")
+        try:
+            ignored = subprocess.run(
+                ["git", "-C", str(ROOT), "check-ignore", "--quiet", str(probe.relative_to(ROOT))],
+            )
+            self.assertEqual(0, ignored.returncode, "probe.pyc must be ignored for this regression")
+            self.assert_no_package_residue()
+        finally:
+            probe.unlink(missing_ok=True)
+            try:
+                cache.rmdir()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
