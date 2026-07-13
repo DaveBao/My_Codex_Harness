@@ -268,10 +268,29 @@ def rollback(journal: list[tuple]) -> bool:
         try:
             if action == "remove":
                 remove_created(path)
+            elif action == "remove-file":
+                mode = path_mode(path)
+                if mode is None:
+                    continue
+                if not stat.S_ISREG(mode) or path.read_bytes() != details[0]:
+                    complete = False
+                    continue
+                path.unlink()
             elif action == "rmdir":
                 path.rmdir()
             elif action == "restore":
-                atomic_write(path, details[0], details[1])
+                old_content, old_mode, expected_content = details
+                mode = path_mode(path)
+                if mode is None or not stat.S_ISREG(mode):
+                    complete = False
+                    continue
+                current = path.read_bytes()
+                if current == old_content:
+                    continue
+                if current != expected_content:
+                    complete = False
+                    continue
+                atomic_write(path, old_content, old_mode)
         except OSError:
             complete = False
     return complete
@@ -297,20 +316,24 @@ def execute_plan(root: Path, plan: list[tuple]) -> None:
                 journal.append(("rmdir", path))
             elif action == "copy-create":
                 source, destination = details
+                expected_content = source.read_bytes()
+                journal.append(("remove-file", destination, expected_content))
                 atomic_copy(source, destination)
-                journal.append(("remove", destination))
             elif action == "copy-replace":
                 source, destination, old_content, old_mode = details
+                expected_content = source.read_bytes()
+                journal.append(
+                    ("restore", destination, old_content, old_mode, expected_content)
+                )
                 atomic_copy(source, destination)
-                journal.append(("restore", destination, old_content, old_mode))
             elif action == "write-create":
                 destination, content, mode = details
+                journal.append(("remove-file", destination, content))
                 atomic_write(destination, content, mode)
-                journal.append(("remove", destination))
             elif action == "write-replace":
                 destination, content, old_content, old_mode = details
+                journal.append(("restore", destination, old_content, old_mode, content))
                 atomic_write(destination, content, old_mode)
-                journal.append(("restore", destination, old_content, old_mode))
             else:
                 raise OSError("unknown initialization action")
     except (OSError, UnicodeError, subprocess.CalledProcessError) as error:

@@ -342,6 +342,50 @@ class InitProjectTests(unittest.TestCase):
 
             self.assertEqual(before, tree_snapshot(target))
 
+    def test_post_replace_failures_roll_back_every_atomic_action_kind(self):
+        for action_kind in (
+            "copy-create",
+            "copy-replace",
+            "write-create",
+            "write-replace",
+        ):
+            with self.subTest(action_kind=action_kind), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)
+                initializer = load_initializer()
+
+                if action_kind != "copy-create":
+                    initialized = run_init(target)
+                    self.assertEqual(0, initialized.returncode, initialized.stderr)
+                if action_kind == "copy-replace":
+                    managed = target / "docs/references/builder-handoff.schema.json"
+                    managed.write_text('{"local":true}\n')
+                    plan, _report = initializer.build_plan(target, force=True)
+                    atomic_name = "atomic_copy"
+                elif action_kind == "write-create":
+                    (target / ".gitignore").unlink()
+                    plan, _report = initializer.build_plan(target, force=False)
+                    atomic_name = "atomic_write"
+                elif action_kind == "write-replace":
+                    (target / ".gitignore").write_bytes(b"project-only\r\n")
+                    plan, _report = initializer.build_plan(target, force=False)
+                    atomic_name = "atomic_write"
+                else:
+                    plan, _report = initializer.build_plan(target, force=False)
+                    atomic_name = "atomic_copy"
+
+                before = tree_snapshot(target)
+                real_atomic = getattr(initializer, atomic_name)
+
+                def fail_after_replace(*args):
+                    real_atomic(*args)
+                    raise OSError("injected post-replace failure")
+
+                with mock.patch.object(initializer, atomic_name, side_effect=fail_after_replace):
+                    with self.assertRaises(initializer.InitError):
+                        initializer.execute_plan(target, plan)
+
+                self.assertEqual(before, tree_snapshot(target))
+
     def test_second_run_is_idempotent_and_reports_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
