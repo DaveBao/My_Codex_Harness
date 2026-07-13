@@ -1,0 +1,24 @@
+{
+  "name": "my-codex-harness",
+  "version": "0.1.0",
+  "description": "A reusable engineering workflow for building reliable Codex projects.",
+  "author": {
+    "name": "Dave Bao"
+  },
+  "repository": "https://github.com/DaveBao/My_Codex_Harness",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "My Codex Harness",
+    "shortDescription": "A reliable engineering workflow for Codex projects.",
+    "longDescription": "Plan, build, review, and validate Codex projects with a small, reusable engineering harness.",
+    "developerName": "Dave Bao",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Skills"
+    ],
+    "defaultPrompt": [
+      "Use My Codex Harness to plan and execute this engineering task."
+    ]
+  }
+}
