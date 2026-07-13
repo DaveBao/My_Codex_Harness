@@ -9,24 +9,24 @@ Initialize a repository with a progressive-disclosure harness. Agents start at `
 
 ## Use
 
-Run the script from the target repository root:
+Resolve this active skill's installed directory, then run its script with an absolute path from the target repository root:
 
 ```bash
-python3 .agents/skills/init-project/scripts/init_project.py --root .
+python3 <init-project-skill-dir>/scripts/init_project.py --root .
 ```
 
-If using this skill from another location, pass the absolute target repo path to `--root`.
+Do not assume a repository-local `.agents/skills/` path. If running from another location, pass the absolute target repository path to `--root`.
 
 ## Rules
 
-- Non-destructive by default: skip existing files; report `created`, `skipped`, and `conflicts`.
+- Non-destructive by default: preserve project-owned files and report `created`, `replaced`, `skipped`, and `conflicts`.
 - Initialize git only when `.git` is absent.
 - Append `.worktrees/` and `.DS_Store` to `.gitignore` if missing.
 - Do not auto-commit, add remotes, push, or rename branches.
 - Create `AGENTS.md` with the project-level agent principles.
-- Do not create or author reusable Orchestrator, Builder, Reviewer, Librarian, or runtime-adapter contracts; they are installed separately.
+- Do not create or author reusable Orchestrator, Builder, Reviewer, or Librarian behavior contracts; they are installed separately. Project `.codex/agents/harness-*.toml` files are prefixed runtime adapters only.
 - Use `--dry-run` to preview changes.
-- Use `--force` only when the user explicitly asks to refresh harness-managed scaffold files. Even then, preserve project-owned `AGENTS.md`, `CLAUDE.md`, design docs, product docs, the active PRD and `TODO.json`, `project-map.md`, the tech-debt tracker, references index, and existing handoff/lifecycle JSONL. Harness-owned schemas and lifecycle guidance may be refreshed.
+- Use `--force` only when the user explicitly asks to refresh harness-managed schemas, lifecycle guidance, or project Codex runtime adapters. Even then, preserve project-owned `AGENTS.md`, `CLAUDE.md`, design docs, product docs, the active PRD and `TODO.json`, `project-map.md`, the tech-debt tracker, references index, existing handoff/lifecycle JSONL, checkpoints, and evidence.
 
 ## Layout
 

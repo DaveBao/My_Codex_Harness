@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builder-handoff.schema.json",
+  "title": "Builder Handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "featureId",
+    "featureName",
+    "featureSpecSha256",
+    "branch",
+    "worktree",
+    "commitSha",
+    "outcome",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "featureId": { "type": "string", "minLength": 1 },
+    "featureName": { "type": "string", "minLength": 1 },
+    "featureSpecSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "branch": { "type": "string", "minLength": 1 },
+    "worktree": { "type": "string", "minLength": 1 },
+    "commitSha": { "type": "string", "minLength": 7 },
+    "outcome": { "enum": ["ready-for-review", "needs-rework", "blocked"] },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "changedFiles",
+        "changedDependencies",
+        "assumptionsChecked",
+        "validation",
+        "tddEvidence",
+        "review"
+      ],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "changedFiles": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "changedDependencies": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "assumptionsChecked": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command", "status", "summary"],
+          "properties": {
+            "command": { "type": "string", "minLength": 1 },
+            "status": { "enum": ["passed", "failed"] },
+            "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          }
+        },
+        "tddEvidence": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["red", "green"],
+              "properties": {
+                "red": { "type": "string", "minLength": 1 },
+                "green": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "steps",
+            "expectedResults",
+            "startCommand",
+            "url",
+            "fixture",
+            "account"
+          ],
+          "properties": {
+            "kind": { "enum": ["web_ui", "runtime", "physical", "text_contract"] },
+            "steps": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "expectedResults": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "startCommand": { "type": ["string", "null"], "minLength": 1 },
+            "url": { "type": ["string", "null"], "minLength": 1 },
+            "fixture": { "type": ["string", "null"], "minLength": 1 },
+            "account": { "type": ["string", "null"], "minLength": 1 }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "kind": { "const": "web_ui" } },
+                "required": ["kind"]
+              },
+              "then": {
+                "properties": {
+                  "startCommand": { "type": "string", "minLength": 1 },
+                  "url": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": { "kind": { "const": "runtime" } },
+                "required": ["kind"]
+              },
+              "then": {
+                "properties": {
+                  "startCommand": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "ready-for-review" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "validation": {
+                "properties": { "status": { "const": "passed" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
