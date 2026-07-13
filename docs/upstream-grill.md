@@ -42,17 +42,43 @@ other inventoried files are byte-for-byte copies from the pinned checkout.
 4. Keep the active `grill-me/SKILL.md` wrapper limited to Codex invocation
    compatibility. Update the directory-local provenance companions, this
    inventory, and `NOTICE`. Recalculate every inventoried SHA-256.
-5. Run all verification commands below before accepting the update.
+5. For an intentional upstream upgrade, update the immutable
+   `UPSTREAM_LICENSE_SHA256` and `UPSTREAM_SKILL_HASHES` test oracles in
+   `tests/test_vendor.py` to the newly verified values. Never update an oracle
+   merely to accept an unexplained local change.
+6. Run all verification commands below before accepting the update.
 
 ## Verification commands
 
+Pin check on POSIX or PowerShell:
+
 ```sh
-git ls-remote --tags https://github.com/mattpocock/skills.git \
-  refs/tags/v1.1.0 'refs/tags/v1.1.0^{}'
+git ls-remote --tags https://github.com/mattpocock/skills.git refs/tags/v1.1.0 'refs/tags/v1.1.0^{}'
+```
+
+### POSIX
+
+```sh
+codex_home="${CODEX_HOME:-$HOME/.codex}"
 python3 scripts/validate_package.py
 python3 -m unittest tests.test_vendor -v
 python3 -m unittest discover -s tests -v
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/plugin-creator/scripts/validate_plugin.py" .
+python3 "$codex_home/skills/.system/plugin-creator/scripts/validate_plugin.py" .
+python3 "$codex_home/skills/.system/skill-creator/scripts/quick_validate.py" skills/grill-me
+python3 "$codex_home/skills/.system/skill-creator/scripts/quick_validate.py" skills/grilling
+git diff --check
+```
+
+### PowerShell
+
+```powershell
+$CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
+py -3 scripts/validate_package.py
+py -3 -m unittest tests.test_vendor -v
+py -3 -m unittest discover -s tests -v
+py -3 (Join-Path $CodexHome "skills/.system/plugin-creator/scripts/validate_plugin.py") .
+py -3 (Join-Path $CodexHome "skills/.system/skill-creator/scripts/quick_validate.py") skills/grill-me
+py -3 (Join-Path $CodexHome "skills/.system/skill-creator/scripts/quick_validate.py") skills/grilling
 git diff --check
 ```
 

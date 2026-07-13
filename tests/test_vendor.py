@@ -1,5 +1,7 @@
 import hashlib
 import re
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,9 +11,28 @@ SOURCE_URL = "https://github.com/mattpocock/skills.git"
 SOURCE_TAG = "v1.1.0"
 SOURCE_COMMIT = "d574778f94cf620fcc8ce741584093bc650a61d3"
 SKILLS = ("grill-me", "grilling")
+UPSTREAM_LICENSE_SHA256 = "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
 UPSTREAM_SKILL_HASHES = {
     "skills/grill-me/upstream/SKILL.md": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54",
     "skills/grilling/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
+}
+PROVENANCE_REQUIREMENTS = {
+    "grill-me": (
+        f"- Source: {SOURCE_URL}",
+        f"- Tag: `{SOURCE_TAG}`",
+        f"- Resolved commit: `{SOURCE_COMMIT}`",
+        "- Original path: `skills/productivity/grill-me/SKILL.md`, preserved at `upstream/SKILL.md`.",
+        "- License: MIT; see `LICENSE.upstream` in this directory.",
+        "- Local status: `SKILL.md` is a Codex-compatible wrapper, while `upstream/SKILL.md` and `LICENSE.upstream` are unmodified upstream files. This provenance file is a local companion.",
+    ),
+    "grilling": (
+        f"- Source: {SOURCE_URL}",
+        f"- Tag: `{SOURCE_TAG}`",
+        f"- Resolved commit: `{SOURCE_COMMIT}`",
+        "- Original path: `skills/productivity/grilling/SKILL.md`",
+        "- License: MIT; see `LICENSE.upstream` in this directory.",
+        "- Local status: `SKILL.md` and `LICENSE.upstream` are unmodified upstream files. This provenance file is a local companion.",
+    ),
 }
 
 
@@ -35,6 +56,20 @@ def frontmatter(path: Path) -> dict[str, str]:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def assert_upstream_licenses(test: unittest.TestCase, root: Path) -> None:
+    for skill in SKILLS:
+        relative = f"skills/{skill}/LICENSE.upstream"
+        test.assertEqual(UPSTREAM_LICENSE_SHA256, sha256(root / relative), relative)
+
+
+def assert_skill_provenance(test: unittest.TestCase, root: Path) -> None:
+    for skill, requirements in PROVENANCE_REQUIREMENTS.items():
+        relative = f"skills/{skill}/UPSTREAM.md"
+        text = (root / relative).read_text(encoding="utf-8")
+        for requirement in requirements:
+            test.assertIn(requirement, text, f"{relative} missing exact provenance")
 
 
 class VendoredGrillTests(unittest.TestCase):
@@ -69,10 +104,41 @@ class VendoredGrillTests(unittest.TestCase):
                 self.assertIn(SOURCE_COMMIT, text)
                 self.assertIn("MIT", text)
 
-        for skill in SKILLS:
-            directory = ROOT / "skills" / skill
-            licenses = [path for path in directory.glob("*LICENSE*") if path.is_file()]
-            self.assertTrue(licenses, f"missing upstream MIT license in skills/{skill}")
+        assert_upstream_licenses(self, ROOT)
+        assert_skill_provenance(self, ROOT)
+
+    def test_altered_license_and_provenance_fail_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / "skills", root / "skills")
+            license_path = root / "skills/grill-me/LICENSE.upstream"
+            license_path.write_bytes(license_path.read_bytes() + b"tampered\n")
+            with self.assertRaisesRegex(AssertionError, "skills/grill-me/LICENSE.upstream"):
+                assert_upstream_licenses(self, root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / "skills", root / "skills")
+            provenance_path = root / "skills/grill-me/UPSTREAM.md"
+            provenance_path.write_text(
+                provenance_path.read_text(encoding="utf-8").replace(
+                    SOURCE_URL,
+                    "https://example.invalid/skills.git",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "skills/grill-me/UPSTREAM.md"):
+                assert_skill_provenance(self, root)
+
+    def test_update_docs_cover_hash_oracles_and_cross_platform_validation(self):
+        document = (ROOT / "docs/upstream-grill.md").read_text(encoding="utf-8")
+        self.assertIn("UPSTREAM_LICENSE_SHA256", document)
+        self.assertIn("UPSTREAM_SKILL_HASHES", document)
+        self.assertIn("### POSIX", document)
+        self.assertIn("### PowerShell", document)
+        self.assertIn("python3", document)
+        self.assertIn("py -3", document)
 
     def test_documented_hashes_match_every_vendored_file(self):
         path = ROOT / "docs/upstream-grill.md"
