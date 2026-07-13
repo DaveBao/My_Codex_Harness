@@ -125,8 +125,13 @@ def _scan_agents(config_text: str) -> tuple[dict[str, object], int | None]:
     header_index = None
     in_agents = False
     at_root = True
+    multiline_delimiter = None
 
     for index, raw_line in enumerate(config_text.splitlines(keepends=True)):
+        if multiline_delimiter is not None:
+            if _has_multiline_close(raw_line, multiline_delimiter):
+                multiline_delimiter = None
+            continue
         line = _strip_comment(raw_line).strip()
         if not line:
             continue
@@ -151,12 +156,21 @@ def _scan_agents(config_text: str) -> tuple[dict[str, object], int | None]:
             agents[key] = _parse_scalar(value_text)
         elif at_root:
             try:
-                key_text, _ = _split_assignment(line)
+                key_text, value_text = _split_assignment(line)
             except ValueError:
                 continue
             if _is_agents_key(key_text):
                 raise ValueError("unsupported agents layout: use one direct [agents] table")
+            multiline_delimiter = _opening_multiline_delimiter(value_text)
+        else:
+            try:
+                _, value_text = _split_assignment(line)
+            except ValueError:
+                continue
+            multiline_delimiter = _opening_multiline_delimiter(value_text)
 
+    if multiline_delimiter is not None:
+        raise ValueError("unterminated TOML multiline string")
     return agents, header_index
 
 
@@ -193,6 +207,31 @@ def _split_assignment(line: str) -> tuple[str, str]:
 def _is_agents_key(key: str) -> bool:
     stripped = key.strip()
     return stripped == "agents" or stripped in ('"agents"', "'agents'") or stripped.startswith("agents.")
+
+
+def _opening_multiline_delimiter(value: str) -> str | None:
+    for delimiter in ('"""', "'''"):
+        if value.startswith(delimiter) and not _has_multiline_close(value[len(delimiter) :], delimiter):
+            return delimiter
+    return None
+
+
+def _has_multiline_close(text: str, delimiter: str) -> bool:
+    start = 0
+    while True:
+        index = text.find(delimiter, start)
+        if index < 0:
+            return False
+        if delimiter == "'''":
+            return True
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return True
+        start = index + 1
 
 
 def _parse_key(key: str) -> str:

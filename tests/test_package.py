@@ -261,6 +261,55 @@ class PackageModelTests(unittest.TestCase):
         )
         self.assertEqual(config, merged.replace('builder = "builder.toml"\n', ""))
 
+    def test_merge_agents_table_ignores_basic_multiline_string_markers(self):
+        config = (
+            'instructions = """\n'
+            "[agents]\n"
+            "agents = not configuration\n"
+            'two quotes are content: ""\n'
+            '"""\n\n'
+            "[agents]\n"
+            "max_threads = 4\n"
+        )
+        merged, agents = merge_agents_table(config, {"builder": "builder.toml"})
+        self.assertEqual({"max_threads": 4, "builder": "builder.toml"}, agents)
+        self.assertEqual(config, merged.replace('builder = "builder.toml"\n', ""))
+
+    def test_merge_agents_table_ignores_literal_multiline_string_markers(self):
+        config = (
+            "instructions = '''\n"
+            "[agents]\n"
+            "agents = not configuration\n"
+            "two quotes are content: ''\n"
+            "'''\n\n"
+            "[agents]\n"
+            "max_threads = 4\n"
+        )
+        merged, agents = merge_agents_table(config, {"builder": "builder.toml"})
+        self.assertEqual({"max_threads": 4, "builder": "builder.toml"}, agents)
+        self.assertEqual(config, merged.replace('builder = "builder.toml"\n', ""))
+
+    def test_parse_agents_table_rejects_multiline_string_value(self):
+        for delimiter in ('"""', "'''"):
+            with self.subTest(delimiter=delimiter):
+                config = (
+                    f"[agents]\ninstructions = {delimiter}\n"
+                    "not supported\n"
+                    f"{delimiter}\n"
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"\[agents\] supports only single-line strings, integers, and booleans",
+                ):
+                    parse_agents_table(config)
+
+    def test_merge_agents_table_rejects_unterminated_multiline_string(self):
+        for delimiter in ('"""', "'''"):
+            with self.subTest(delimiter=delimiter):
+                config = f"instructions = {delimiter}\n[agents]\n"
+                with self.assertRaisesRegex(ValueError, "unterminated TOML multiline string"):
+                    merge_agents_table(config, {"builder": "builder.toml"})
+
     def test_merge_agents_table_rejects_root_inline_layout(self):
         config = "agents = { max_threads = 4 }\n"
         with self.assertRaisesRegex(ValueError, "unsupported agents layout"):
