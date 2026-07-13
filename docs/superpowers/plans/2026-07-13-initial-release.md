@@ -57,7 +57,10 @@ class PackageContractTests(unittest.TestCase):
 
     def test_marketplace_points_to_repository_plugin(self):
         marketplace = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
-        self.assertEqual(marketplace["plugins"][0]["source"]["path"], "./")
+        source = marketplace["plugins"][0]["source"]
+        self.assertEqual(source["source"], "url")
+        self.assertEqual(source["url"], "https://github.com/DaveBao/My_Codex_Harness.git")
+        self.assertEqual(source["ref"], "main")
 
     def test_required_top_level_documents_exist(self):
         for name in ["README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"]:
