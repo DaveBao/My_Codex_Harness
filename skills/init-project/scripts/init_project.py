@@ -49,6 +49,14 @@ def empty_report() -> dict[str, list[str]]:
     return {key: [] for key in REPORT_KEYS}
 
 
+def git_environment() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.copy().items()
+        if not key.upper().startswith("GIT_")
+    }
+
+
 def path_mode(path: Path) -> int | None:
     try:
         return path.lstat().st_mode
@@ -80,7 +88,9 @@ def destination_issue(root: Path, destination: Path, expect_directory: bool) -> 
     return None
 
 
-def probe_git_root(root: Path) -> Path | None:
+def probe_git_root(root: Path, git_env: dict[str, str] | None = None) -> Path | None:
+    if git_env is None:
+        git_env = git_environment()
     git_path = root / ".git"
     git_mode = path_mode(git_path)
     if git_mode is not None and stat.S_ISLNK(git_mode):
@@ -91,6 +101,7 @@ def probe_git_root(root: Path) -> Path | None:
         result = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
+            env=git_env,
             text=True,
         )
     except FileNotFoundError as error:
@@ -107,6 +118,7 @@ def probe_git_root(root: Path) -> Path | None:
         prefix = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-prefix"],
             capture_output=True,
+            env=git_env,
             text=True,
         )
         if prefix.returncode != 0:
@@ -120,6 +132,9 @@ def probe_git_root(root: Path) -> Path | None:
             raise InitError("Git work-tree root has no local .git metadata")
         return root
     if result.returncode == 128 and git_mode is None:
+        for ancestor in root.parents:
+            if path_mode(ancestor / ".git") is not None:
+                raise InitError("ancestor .git metadata makes the target repository unverifiable")
         return None
     if git_mode is not None:
         raise InitError("target contains existing invalid .git metadata")
@@ -164,10 +179,14 @@ def gitignore_content(existing: bytes | None) -> tuple[bytes, list[str]]:
     return content + separator + appended, additions
 
 
-def build_plan(root: Path, force: bool) -> tuple[list[tuple], dict[str, list[str]]]:
+def build_plan(
+    root: Path, force: bool, git_env: dict[str, str] | None = None
+) -> tuple[list[tuple], dict[str, list[str]]]:
+    if git_env is None:
+        git_env = git_environment()
     plan: list[tuple] = []
     report = empty_report()
-    git_root = probe_git_root(root)
+    git_root = probe_git_root(root, git_env)
     gitignore = read_gitignore(root, report)
 
     if git_root is None:
@@ -314,12 +333,16 @@ def git_tree_fingerprint(git_path: Path) -> tuple:
     return tuple(entries)
 
 
-def validate_action(root: Path, entry: tuple) -> None:
+def validate_action(
+    root: Path, entry: tuple, git_env: dict[str, str] | None = None
+) -> None:
+    if git_env is None:
+        git_env = git_environment()
     action, *details = entry
     if action == "git-init":
         if path_mode(root / ".git") is not None:
             raise OSError("target .git appeared after planning")
-        if probe_git_root(root) is not None:
+        if probe_git_root(root, git_env) is not None:
             raise OSError("target became a Git repository after planning")
         if path_mode(root / ".git") is not None:
             raise OSError("target .git appeared during validation")
@@ -398,17 +421,23 @@ def rollback(journal: list[tuple]) -> bool:
     return complete
 
 
-def execute_plan(root: Path, plan: list[tuple]) -> None:
+def execute_plan(
+    root: Path, plan: list[tuple], git_env: dict[str, str] | None = None
+) -> None:
+    if git_env is None:
+        git_env = git_environment()
     journal: list[tuple] = []
     try:
         for entry in plan:
             action, *details = entry
-            validate_action(root, entry)
+            validate_action(root, entry, git_env)
             if action == "git-init":
                 git_path = root / ".git"
                 journal.append(("git-intent", git_path))
                 try:
-                    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+                    subprocess.run(
+                        ["git", "init", "-q"], cwd=root, env=git_env, check=True
+                    )
                 except (OSError, subprocess.CalledProcessError):
                     raise
                 journal[-1] = ("remove-git", git_path, git_tree_fingerprint(git_path))
@@ -469,12 +498,13 @@ def main() -> int:
         return 2
 
     try:
-        plan, report = build_plan(root, args.force)
+        git_env = git_environment()
+        plan, report = build_plan(root, args.force, git_env)
         if report["conflicts"]:
             print_report(report)
             return 1
         if not args.dry_run:
-            execute_plan(root, plan)
+            execute_plan(root, plan, git_env)
     except InitError as error:
         print(f"init-project failed: {error}", file=sys.stderr)
         return 2

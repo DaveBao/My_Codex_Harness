@@ -17,12 +17,14 @@ def run_init(
     root: Path,
     *args: str,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--root", str(root), *args],
         cwd=cwd or ROOT,
         capture_output=True,
+        env=env,
         text=True,
         timeout=timeout,
     )
@@ -358,6 +360,146 @@ class InitProjectTests(unittest.TestCase):
 
             with mock.patch.object(initializer.subprocess, "run", return_value=localized):
                 self.assertIsNone(initializer.probe_git_root(target))
+
+    def test_polluted_git_environment_cannot_bypass_conflicts_or_parent_repo(self):
+        for scenario in ("managed_conflict", "parent_repo"):
+            for dry_run in (False, True):
+                with (
+                    self.subTest(scenario=scenario, dry_run=dry_run),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    base = Path(directory)
+                    external = base / "external"
+                    external.mkdir()
+                    subprocess.run(["git", "init", "-q"], cwd=external, check=True)
+                    if scenario == "parent_repo":
+                        parent = base / "parent"
+                        parent.mkdir()
+                        subprocess.run(["git", "init", "-q"], cwd=parent, check=True)
+                        target = parent / "child"
+                        target.mkdir()
+                    else:
+                        target = base / "target"
+                        target.mkdir()
+                        conflict = target / "docs/references/builder-handoff.schema.json"
+                        conflict.parent.mkdir(parents=True)
+                        conflict.write_text('{"local":true}\n')
+                    polluted = os.environ.copy()
+                    polluted.update(
+                        {
+                            "GIT_DIR": str(external / ".git"),
+                            "GIT_COMMON_DIR": str(external / ".git"),
+                            "GIT_OBJECT_DIRECTORY": str(external / ".git/objects"),
+                            "GIT_CEILING_DIRECTORIES": str(base),
+                            "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+                        }
+                    )
+                    before = tree_snapshot(base)
+
+                    args = ("--dry-run",) if dry_run else ()
+                    result = run_init(target, *args, env=polluted)
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual(before, tree_snapshot(base))
+                    if scenario == "parent_repo":
+                        self.assertIn("existing Git repository", result.stderr)
+                    else:
+                        self.assertIn(
+                            "docs/references/builder-handoff.schema.json", result.stdout
+                        )
+
+    def test_fresh_init_with_polluted_git_paths_never_writes_external_repo(self):
+        git_paths = {
+            "GIT_DIR": ".git",
+            "GIT_COMMON_DIR": ".git",
+            "GIT_OBJECT_DIRECTORY": ".git/objects",
+        }
+        for variable, external_relative in git_paths.items():
+            for dry_run in (False, True):
+                with (
+                    self.subTest(variable=variable, dry_run=dry_run),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    base = Path(directory)
+                    external = base / "external"
+                    external.mkdir()
+                    subprocess.run(["git", "init", "-q"], cwd=external, check=True)
+                    target = base / "fresh-target"
+                    target.mkdir()
+                    polluted = os.environ.copy()
+                    polluted[variable] = str(external / external_relative)
+                    external_before = tree_snapshot(external)
+                    target_before = tree_snapshot(target)
+
+                    args = ("--dry-run",) if dry_run else ()
+                    result = run_init(target, *args, env=polluted)
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(external_before, tree_snapshot(external))
+                    if dry_run:
+                        self.assertEqual(target_before, tree_snapshot(target))
+                    else:
+                        self.assertTrue((target / ".git").is_dir())
+                        self.assertTrue((target / "AGENTS.md").is_file())
+
+    def test_simulated_non_repo_result_rejects_ancestor_git_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=parent, check=True)
+            target = parent / "child"
+            target.mkdir()
+            initializer = load_initializer()
+            non_repo = subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout="", stderr="localized failure\n"
+            )
+            before = tree_snapshot(parent)
+
+            with mock.patch.object(initializer.subprocess, "run", return_value=non_repo):
+                with self.assertRaisesRegex(initializer.InitError, "ancestor.*.git"):
+                    initializer.probe_git_root(target)
+
+            self.assertEqual(before, tree_snapshot(parent))
+
+    def test_every_git_call_receives_the_same_sanitized_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            existing = base / "existing"
+            existing.mkdir()
+            (existing / ".git").mkdir()
+            fresh = base / "fresh"
+            fresh.mkdir()
+            initializer = load_initializer()
+            polluted_keys = {
+                "GIT_DIR": "outside",
+                "GIT_COMMON_DIR": "outside",
+                "GIT_OBJECT_DIRECTORY": "outside",
+                "GIT_CEILING_DIRECTORIES": "outside",
+                "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+                "GIT_FUTURE_VARIABLE": "outside",
+            }
+            calls: list[dict] = []
+
+            def git_call(command, **kwargs):
+                calls.append(kwargs)
+                if "--is-inside-work-tree" in command:
+                    value = "true\n" if Path(command[2]) == existing else ""
+                    code = 0 if value else 128
+                    return subprocess.CompletedProcess(command, code, value, "")
+                if "--show-prefix" in command:
+                    return subprocess.CompletedProcess(command, 0, "\n", "")
+                (Path(kwargs["cwd"]) / ".git").mkdir()
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.dict(os.environ, polluted_keys, clear=False):
+                clean = initializer.git_environment()
+                with mock.patch.object(initializer.subprocess, "run", side_effect=git_call):
+                    initializer.probe_git_root(existing, clean)
+                    initializer.execute_plan(fresh, [("git-init", fresh)], clean)
+
+            self.assertIn("PATH", clean)
+            self.assertFalse(any(key.startswith("GIT_") for key in clean))
+            self.assertEqual(4, len(calls))
+            self.assertTrue(all(call.get("env") is clean for call in calls))
 
     def test_post_plan_destination_drift_fails_without_overwrite_or_escape(self):
         for drift_kind in ("create_file", "managed_replace", "parent_symlink"):
