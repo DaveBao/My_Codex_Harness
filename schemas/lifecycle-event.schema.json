@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lifecycle-event.schema.json",
+  "title": "Worklog Lifecycle Event",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "runId",
+    "waveId",
+    "featureId",
+    "featureName",
+    "spanId",
+    "parentSpanId",
+    "timestamp",
+    "phase",
+    "actor",
+    "action",
+    "model",
+    "reasoningEffort",
+    "durationMs",
+    "tokens",
+    "status",
+    "outcome",
+    "error",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "waveId": { "type": ["string", "null"], "minLength": 1 },
+    "featureId": { "type": ["string", "null"], "minLength": 1 },
+    "featureName": { "type": ["string", "null"], "minLength": 1 },
+    "spanId": { "type": "string", "minLength": 1 },
+    "parentSpanId": { "type": ["string", "null"], "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "phase": { "enum": ["started", "finished"] },
+    "actor": { "enum": ["orchestrator", "builder", "reviewer", "librarian"] },
+    "action": {
+      "enum": [
+        "run",
+        "wave",
+        "implement_feature",
+        "review_feature",
+        "maintain_project_map",
+        "merge_feature",
+        "validate_feature",
+        "validate_global",
+        "retry",
+        "handoff_rejection",
+        "context_repair",
+        "checkpoint",
+        "pause_context",
+        "resume_run"
+      ]
+    },
+    "model": { "type": ["string", "null"], "minLength": 1 },
+    "reasoningEffort": { "type": ["string", "null"], "minLength": 1 },
+    "durationMs": { "type": ["integer", "null"], "minimum": 0 },
+    "tokens": {
+      "type": "object",
+      "required": ["input", "cachedInput", "output", "total"],
+      "additionalProperties": false,
+      "properties": {
+        "input": { "type": ["integer", "null"], "minimum": 0 },
+        "cachedInput": { "type": ["integer", "null"], "minimum": 0 },
+        "output": { "type": ["integer", "null"], "minimum": 0 },
+        "total": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "status": { "enum": [null, "succeeded", "failed", "blocked", "interrupted", "cancelled"] },
+    "outcome": { "type": ["string", "null"], "minLength": 1 },
+    "error": {
+      "type": ["object", "null"],
+      "required": ["category", "retryable", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "category": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "metadata": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "phase": { "const": "started" } } },
+      "then": {
+        "properties": {
+          "durationMs": { "const": null },
+          "status": { "const": null },
+          "outcome": { "const": null },
+          "error": { "const": null }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "phase": { "const": "finished" } } },
+      "then": {
+        "properties": {
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "status": { "enum": ["succeeded", "failed", "blocked", "interrupted", "cancelled"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "featureId": { "type": "null" } } },
+      "then": { "properties": { "featureName": { "type": "null" } } },
+      "else": { "properties": { "featureName": { "type": "string", "minLength": 1 } } }
+    }
+  ]
+}

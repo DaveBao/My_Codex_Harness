@@ -1,0 +1,6 @@
+interface:
+  display_name: "Orchestrator"
+  short_description: "Run dependency-ready harness feature waves"
+  default_prompt: "Use $orchestrator to run or resume dependency-ready harness feature waves."
+policy:
+  allow_implicit_invocation: true

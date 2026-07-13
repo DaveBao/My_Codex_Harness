@@ -1,0 +1,6 @@
+interface:
+  display_name: "Grill Me"
+  short_description: "Start a Codex-compatible grilling session"
+  default_prompt: "Use $grill-me to start a focused plan-grilling session."
+policy:
+  allow_implicit_invocation: true

@@ -21,14 +21,17 @@ upstream `disable-model-invocation: true` field and uses `$grilling` invocation.
 | `skills/grill-me/LICENSE.upstream` | `0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5` | `LICENSE` | Unmodified upstream file |
 | `skills/grill-me/SKILL.md` | `55be62cba5804524524adfe5eb85c4f11513f0b4d89c26f162c6014c119a1fec` | Not applicable | Local Codex compatibility wrapper |
 | `skills/grill-me/UPSTREAM.md` | `48e09798e661946d5d242700c978ee2d7672643a2f4dfc23185db3864080fd1b` | Not applicable | Local provenance companion |
+| `skills/grill-me/agents/openai.yaml` | `fb4368b1b5026f0315f4bed3992ea887bea516f0489351a33696c41f3e013eac` | Not applicable | Local Codex skill metadata |
 | `skills/grill-me/upstream/SKILL.md` | `6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54` | `skills/productivity/grill-me/SKILL.md` | Unmodified upstream file |
 | `skills/grilling/LICENSE.upstream` | `0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5` | `LICENSE` | Unmodified upstream file |
 | `skills/grilling/SKILL.md` | `5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478` | `skills/productivity/grilling/SKILL.md` | Unmodified upstream file |
 | `skills/grilling/UPSTREAM.md` | `513b54dd6b01e2e2dcd5ec70a8861c7c6395d2032c3107b551d0af889e4f8757` | Not applicable | Local provenance companion |
+| `skills/grilling/agents/openai.yaml` | `56da5357f179bbae488318a3278b77a328a4de457baf18bef8d762c8b6b438e5` | Not applicable | Local Codex skill metadata |
 
-The active `grill-me/SKILL.md` wrapper and two `UPSTREAM.md` files are local
-additions. `NOTICE` and this document are also local attribution changes. All
-other inventoried files are byte-for-byte copies from the pinned checkout.
+The active `grill-me/SKILL.md` wrapper, two `UPSTREAM.md` files, and Codex
+`agents/openai.yaml` metadata are local additions. `NOTICE` and this document
+are also local attribution changes. All other inventoried files are
+byte-for-byte copies from the pinned checkout.
 
 ## Update procedure
 

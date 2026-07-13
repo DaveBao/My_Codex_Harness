@@ -11,6 +11,17 @@ SOURCE_URL = "https://github.com/mattpocock/skills.git"
 SOURCE_TAG = "v1.1.0"
 SOURCE_COMMIT = "d574778f94cf620fcc8ce741584093bc650a61d3"
 SKILLS = ("grill-me", "grilling")
+ACTIVE_SKILLS = {
+    "grill-me",
+    "grilling",
+    "init-project",
+    "to-exec-plan",
+    "orchestrator",
+    "builder",
+    "reviewer",
+    "librarian",
+    "complete-project",
+}
 UPSTREAM_LICENSE_SHA256 = "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
 UPSTREAM_SKILL_HASHES = {
     "skills/grill-me/upstream/SKILL.md": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54",
@@ -163,11 +174,11 @@ class VendoredGrillTests(unittest.TestCase):
             with self.subTest(path=relative):
                 self.assertEqual(recorded[relative], sha256(path))
 
-    def test_no_unrelated_top_level_skill_directory_is_present(self):
+    def test_only_expected_top_level_skill_directories_are_present(self):
         skill_root = ROOT / "skills"
         self.assertTrue(skill_root.is_dir(), "missing skills directory")
         actual = {path.name for path in skill_root.iterdir() if path.is_dir()}
-        self.assertEqual(set(SKILLS), actual)
+        self.assertEqual(ACTIVE_SKILLS, actual)
 
     def test_vendored_files_are_regular_files(self):
         for skill in SKILLS:

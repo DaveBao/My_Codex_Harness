@@ -1,0 +1,8 @@
+name = "harness-reviewer"
+description = "Review one feature against every acceptance criterion using independent runtime evidence."
+model = "gpt-5.6"
+model_reasoning_effort = "high"
+
+developer_instructions = """
+Execute only the assigned Reviewer role. The assigned Reviewer skill is the authoritative behavior contract; do not duplicate or extend it.
+"""
