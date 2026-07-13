@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deploy_model import (  # noqa: E402
     DESIRED_AGENTS,
     canonical_owned_path,
+    hash_path,
     load_json_object,
     validate_home,
     validate_target,
@@ -31,6 +32,16 @@ from deploy_model import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_CONFIG_BACKUP = re.compile(
+    r"\.codex/my-codex-harness/backups/config\.toml\.backup-[0-9]{8}T[0-9]{12}Z"
+)
+_CLEANUP_BACKUP = re.compile(
+    r"(?:\.codex/plugins/\.my-codex-harness|\.agents/skills/\.[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"\.rollback-[0-9]{8}T[0-9]{12}Z"
+)
+_INSTALL_JOURNAL = re.compile(
+    r"\.codex/my-codex-harness/journals/install-[0-9]{8}T[0-9]{12}Z\.json"
+)
 _MANIFEST_FIELDS = {"version", "sourceCommit", "desiredAgents", "files"}
 _STATE_FIELDS = {
     "version",
@@ -221,20 +232,63 @@ def _state_paths(home: Path, value: object, label: str) -> list[str]:
     return value
 
 
-def _state_hash_entries(home: Path, value: object, label: str) -> list[dict]:
+def _state_hash_entries(
+    home: Path,
+    value: object,
+    label: str,
+    allowed_path: re.Pattern,
+    *,
+    regular_only: bool = False,
+) -> list[dict]:
     if not isinstance(value, list):
         raise ValueError(f"install state {label} must be a list")
     paths = []
     for entry in value:
         if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
             raise ValueError(f"install state {label} contains an invalid entry")
-        canonical_owned_path(home, entry["path"])
+        relative = entry["path"]
+        if not isinstance(relative, str) or allowed_path.fullmatch(relative) is None:
+            raise ValueError(f"install state {label} contains an invalid path")
+        path = canonical_owned_path(home, relative)
         if not isinstance(entry["sha256"], str) or _SHA256.fullmatch(entry["sha256"]) is None:
             raise ValueError(f"install state {label} contains an invalid hash")
-        paths.append(entry["path"])
+        if not path.exists() and not path.is_symlink():
+            raise ValueError(f"install state {label} path is missing")
+        if regular_only and (path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode)):
+            raise ValueError(f"install state {label} path must be a regular file")
+        if hash_path(path) != entry["sha256"]:
+            raise ValueError(f"install state {label} hash does not match its path")
+        paths.append(relative)
     if len(paths) != len(set(paths)):
         raise ValueError(f"install state {label} contains duplicate paths")
     return value
+
+
+def _validate_last_journal(home: Path, state: dict, cleanup: list[dict], warnings: list[str]) -> None:
+    relative = state["lastJournal"]
+    if not isinstance(relative, str) or _INSTALL_JOURNAL.fullmatch(relative) is None:
+        raise ValueError("install state lastJournal is not a canonical install journal path")
+    path = canonical_owned_path(home, relative)
+    if not path.exists() or path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError("install state lastJournal must be an existing regular file")
+    journal = load_json_object(path)
+    expected_status = "cleanup-incomplete" if state["cleanupIncomplete"] else "completed"
+    if journal.get("status") != expected_status:
+        raise ValueError("install state cleanup fields do not match the journal status")
+    if not state["cleanupIncomplete"] and (cleanup or warnings):
+        raise ValueError("completed install state contains cleanup data")
+    actions = journal.get("actions")
+    if not isinstance(actions, list):
+        raise ValueError("install journal actions must be a list")
+    state_intents = [
+        action
+        for action in actions
+        if isinstance(action, dict) and action.get("action") == "intent-state"
+    ]
+    if len(state_intents) != 1 or state_intents[0].get("path") != (
+        ".codex/my-codex-harness/install-state.json"
+    ):
+        raise ValueError("install journal is not bound to the install state")
 
 
 def _validate_install_state(home: Path, state: object) -> None:
@@ -248,7 +302,13 @@ def _validate_install_state(home: Path, state: object) -> None:
     owned = _state_paths(home, state["ownedPaths"], "ownedPaths")
     created = _state_paths(home, state["createdPaths"], "createdPaths")
     replaced = _state_paths(home, state["replacedPaths"], "replacedPaths")
-    if set(created) & set(replaced) or not set(owned).issubset(set(created) | set(replaced)):
+    history = set(created) | set(replaced)
+    allowed_history = set(owned) | {".codex/config.toml"}
+    if (
+        set(created) & set(replaced)
+        or not set(owned).issubset(history)
+        or not history.issubset(allowed_history)
+    ):
         raise ValueError("install state createdPaths and replacedPaths are inconsistent")
     hashes = state["hashes"]
     if not isinstance(hashes, dict) or set(hashes) != set(owned):
@@ -257,8 +317,12 @@ def _validate_install_state(home: Path, state: object) -> None:
         canonical_owned_path(home, path)
         if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
             raise ValueError(f"install state contains an invalid hash: {path}")
-    _state_hash_entries(home, state["backups"], "backups")
-    cleanup = _state_hash_entries(home, state["cleanupBackups"], "cleanupBackups")
+    _state_hash_entries(
+        home, state["backups"], "backups", _CONFIG_BACKUP, regular_only=True
+    )
+    cleanup = _state_hash_entries(
+        home, state["cleanupBackups"], "cleanupBackups", _CLEANUP_BACKUP
+    )
     for field in ("addedConfigKeys", "preservedConfigKeys"):
         value = state[field]
         if not isinstance(value, dict) or not set(value).issubset(DESIRED_AGENTS):
@@ -274,9 +338,6 @@ def _validate_install_state(home: Path, state: object) -> None:
         raise ValueError("install state preservedConfigKeys contains invalid value types")
     if set(added) | set(preserved) != set(DESIRED_AGENTS):
         raise ValueError("install state config keys are incomplete")
-    if not isinstance(state["lastJournal"], str) or not state["lastJournal"]:
-        raise ValueError("install state lastJournal must be a path")
-    canonical_owned_path(home, state["lastJournal"])
     if not isinstance(state["cleanupIncomplete"], bool):
         raise ValueError("install state cleanupIncomplete must be a boolean")
     if cleanup and not state["cleanupIncomplete"]:
@@ -286,6 +347,7 @@ def _validate_install_state(home: Path, state: object) -> None:
         raise ValueError("install state installWarnings must be a list of strings")
     if state["cleanupIncomplete"] and not cleanup and not warnings:
         raise ValueError("install state cleanup state lacks an explanation")
+    _validate_last_journal(home, state, cleanup, warnings)
 
 
 def _check_prerequisites(home: Path, require_codex: bool) -> list[str]:

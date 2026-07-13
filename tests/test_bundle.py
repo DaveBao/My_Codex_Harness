@@ -272,6 +272,169 @@ name = 'one'
             with self.assertRaises(ValueError):
                 doctor._validate_install_state(home, inconsistent)
 
+    def test_doctor_rejects_created_or_replaced_paths_outside_owned_paths_and_config(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state = json.loads(
+                (home / ".codex/my-codex-harness/install-state.json").read_text()
+            )
+
+            for field in ("createdPaths", "replacedPaths"):
+                candidate = json.loads(json.dumps(state))
+                candidate[field].append(".ssh/id_rsa")
+                with self.subTest(field=field), self.assertRaisesRegex(
+                    ValueError, "createdPaths|replacedPaths"
+                ):
+                    doctor._validate_install_state(home, candidate)
+
+    def test_doctor_rejects_untrusted_missing_or_drifted_state_backups(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / ".codex/config.toml"
+            config.parent.mkdir()
+            config.write_text('model = "custom"\n')
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state = json.loads(
+                (home / ".codex/my-codex-harness/install-state.json").read_text()
+            )
+            doctor._validate_install_state(home, state)
+
+            backup = home / state["backups"][0]["path"]
+            original = backup.read_bytes()
+            backup.unlink()
+            with self.assertRaisesRegex(ValueError, "backups"):
+                doctor._validate_install_state(home, state)
+            backup.write_bytes(original)
+
+            backup.write_text("drifted\n")
+            with self.assertRaisesRegex(ValueError, "backups"):
+                doctor._validate_install_state(home, state)
+            backup.write_bytes(original)
+
+            malicious = home / ".ssh/id_rsa"
+            malicious.parent.mkdir()
+            malicious.write_bytes(b"private\n")
+            candidate = json.loads(json.dumps(state))
+            candidate["backups"] = [
+                {
+                    "path": ".ssh/id_rsa",
+                    "sha256": hashlib.sha256(b"file\0private\n").hexdigest(),
+                }
+            ]
+            with self.assertRaisesRegex(ValueError, "backups"):
+                doctor._validate_install_state(home, candidate)
+
+    def test_doctor_rejects_untrusted_cleanup_backups(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state = json.loads(
+                (home / ".codex/my-codex-harness/install-state.json").read_text()
+            )
+            malicious = home / ".ssh/id_rsa"
+            malicious.parent.mkdir()
+            malicious.write_bytes(b"private\n")
+            state["cleanupBackups"] = [
+                {
+                    "path": ".ssh/id_rsa",
+                    "sha256": hashlib.sha256(b"file\0private\n").hexdigest(),
+                }
+            ]
+            state["cleanupIncomplete"] = True
+            state["installWarnings"] = ["cleanup failed"]
+
+            with self.assertRaisesRegex(ValueError, "cleanupBackups"):
+                doctor._validate_install_state(home, state)
+
+            allowed = ".agents/skills/.builder.rollback-20260714T010203000000Z"
+            candidate = json.loads(json.dumps(state))
+            candidate["cleanupBackups"] = [
+                {"path": allowed, "sha256": hashlib.sha256(b"file\0backup\n").hexdigest()}
+            ]
+            with self.assertRaisesRegex(ValueError, "cleanupBackups"):
+                doctor._validate_install_state(home, candidate)
+
+            backup = home / allowed
+            backup.write_bytes(b"backup\n")
+            journal_path = home / candidate["lastJournal"]
+            journal = json.loads(journal_path.read_text())
+            journal["status"] = "cleanup-incomplete"
+            journal_path.write_text(json.dumps(journal))
+            doctor._validate_install_state(home, candidate)
+
+            candidate["cleanupBackups"][0]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "cleanupBackups"):
+                doctor._validate_install_state(home, candidate)
+
+    def test_doctor_validates_last_journal_path_status_and_state_binding(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state = json.loads(
+                (home / ".codex/my-codex-harness/install-state.json").read_text()
+            )
+            journal_path = home / state["lastJournal"]
+            journal = json.loads(journal_path.read_text())
+            doctor._validate_install_state(home, state)
+
+            fake_journal = home / ".ssh/id_rsa"
+            fake_journal.parent.mkdir()
+            fake_journal.write_text(json.dumps(journal))
+            candidate = json.loads(json.dumps(state))
+            candidate["lastJournal"] = ".ssh/id_rsa"
+            with self.assertRaisesRegex(ValueError, "lastJournal"):
+                doctor._validate_install_state(home, candidate)
+
+            for status in ("running", "cleanup-incomplete"):
+                changed = json.loads(json.dumps(journal))
+                changed["status"] = status
+                journal_path.write_text(json.dumps(changed))
+                with self.subTest(status=status), self.assertRaisesRegex(
+                    ValueError, "journal|cleanup"
+                ):
+                    doctor._validate_install_state(home, state)
+
+            unbound = json.loads(json.dumps(journal))
+            unbound["actions"] = [
+                action for action in unbound["actions"] if action.get("action") != "intent-state"
+            ]
+            journal_path.write_text(json.dumps(unbound))
+            with self.assertRaisesRegex(ValueError, "journal"):
+                doctor._validate_install_state(home, state)
+
     def test_doctor_installed_rejects_missing_identity_or_untrusted_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
