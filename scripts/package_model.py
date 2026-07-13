@@ -2,16 +2,10 @@
 
 import hashlib as _hashlib
 import json as _json
-import math as _math
 import os as _os
 import re as _re
 import tempfile as _tempfile
 from pathlib import Path
-
-try:
-    import tomllib as _tomllib
-except ModuleNotFoundError:  # Python 3.10 compatibility
-    _tomllib = None
 
 
 __all__ = [
@@ -24,7 +18,12 @@ __all__ = [
 ]
 
 _BARE_KEY = _re.compile(r"^[A-Za-z0-9_-]+$")
-_TABLE = _re.compile(r"^\[([^\[\]]+)\]$")
+_DECIMAL_INTEGER = _re.compile(r"^[+-]?(?:0|[1-9](?:_?[0-9])*)$")
+_HEX_INTEGER = _re.compile(r"^0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*$")
+_AGENTS_HEADER = _re.compile(
+    r"^\[{1,2}\s*(?:agents|['\"]agents['\"])(?:\s*[.\]])"
+)
+_SUPPORTED_VALUES = "[agents] supports only single-line strings, integers, and booleans"
 
 
 def sha256_file(path: Path) -> str:
@@ -52,6 +51,8 @@ def load_json(path: Path) -> dict:
 
 
 def atomic_write(path: Path, content: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing to replace symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -73,59 +74,43 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def parse_agents_table(config_text: str) -> dict[str, object]:
-    if _tomllib is not None:
-        agents = _tomllib.loads(config_text).get("agents", {})
-        if not isinstance(agents, dict):
-            raise ValueError("[agents] must be a table")
-        return agents
-
-    agents: dict[str, object] = {}
-    in_agents = False
-    for raw_line in config_text.splitlines():
-        line = _strip_comment(raw_line).strip()
-        if not line:
-            continue
-        table = _table_name(line)
-        if table is not None:
-            if table == "agents":
-                in_agents = True
-                continue
-            if in_agents:
-                break
-            continue
-        if in_agents:
-            key, value = _split_once(line, "=")
-            agents[_parse_key(key.strip())] = _parse_value(value.strip())
+    agents, _ = _scan_agents(config_text)
     return agents
 
 
 def merge_agents_table(
     config_text: str, desired: dict[str, object]
 ) -> tuple[str, dict[str, object]]:
-    existing = parse_agents_table(config_text)
+    existing, header_index = _scan_agents(config_text)
     additions = {key: value for key, value in desired.items() if key not in existing}
-    merged = {**existing, **additions}
-    if not additions:
-        return config_text, merged
-
     entries = "".join(
-        f"{_format_key(key)} = {_format_value(value)}\n"
+        f"{_format_key(key)} = {_format_scalar(value)}\n"
         for key, value in sorted(additions.items())
     )
-    lines = config_text.splitlines(keepends=True)
-    header_index = next(
-        (index for index, line in enumerate(lines) if _table_name(_strip_comment(line).strip()) == "agents"),
-        None,
-    )
+    merged = {**existing, **additions}
+    if not entries:
+        return config_text, merged
+
     if header_index is None:
-        separator = "" if not config_text else ("\n" if config_text.endswith("\n") else "\n\n")
+        if not config_text:
+            separator = ""
+        elif config_text.endswith("\n\n"):
+            separator = ""
+        elif config_text.endswith("\n"):
+            separator = "\n"
+        else:
+            separator = "\n\n"
         return f"{config_text}{separator}[agents]\n{entries}", merged
 
-    insertion_index = len(lines)
-    for index in range(header_index + 1, len(lines)):
-        if _table_name(_strip_comment(lines[index]).strip()) is not None:
-            insertion_index = index
-            break
+    lines = config_text.splitlines(keepends=True)
+    insertion_index = next(
+        (
+            index
+            for index in range(header_index + 1, len(lines))
+            if _strip_comment(lines[index]).strip().startswith("[")
+        ),
+        len(lines),
+    )
     while insertion_index > header_index + 1 and not lines[insertion_index - 1].strip():
         insertion_index -= 1
     prefix = ""
@@ -133,6 +118,46 @@ def merge_agents_table(
         prefix = "\n"
     lines.insert(insertion_index, prefix + entries)
     return "".join(lines), merged
+
+
+def _scan_agents(config_text: str) -> tuple[dict[str, object], int | None]:
+    agents: dict[str, object] = {}
+    header_index = None
+    in_agents = False
+    at_root = True
+
+    for index, raw_line in enumerate(config_text.splitlines(keepends=True)):
+        line = _strip_comment(raw_line).strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            if line == "[agents]":
+                if header_index is not None:
+                    raise ValueError("duplicate [agents] table")
+                header_index = index
+                in_agents = True
+            else:
+                if _AGENTS_HEADER.match(line):
+                    raise ValueError("unsupported agents layout: use one direct [agents] table")
+                in_agents = False
+            at_root = False
+            continue
+
+        if in_agents:
+            key_text, value_text = _split_assignment(line)
+            key = _parse_key(key_text)
+            if key in agents:
+                raise ValueError(f"duplicate key in [agents]: {key}")
+            agents[key] = _parse_scalar(value_text)
+        elif at_root:
+            try:
+                key_text, _ = _split_assignment(line)
+            except ValueError:
+                continue
+            if _is_agents_key(key_text):
+                raise ValueError("unsupported agents layout: use one direct [agents] table")
+
+    return agents, header_index
 
 
 def _strip_comment(line: str) -> str:
@@ -150,79 +175,54 @@ def _strip_comment(line: str) -> str:
     return line
 
 
-def _table_name(line: str) -> str | None:
-    match = _TABLE.fullmatch(line)
-    return match.group(1).strip() if match else None
-
-
-def _split_once(text: str, separator: str) -> tuple[str, str]:
+def _split_assignment(line: str) -> tuple[str, str]:
     quote = None
-    depth = 0
     escaped = False
-    for index, character in enumerate(text):
+    for index, character in enumerate(line):
         if quote == '"' and character == "\\" and not escaped:
             escaped = True
             continue
         if character in ("'", '"') and not escaped:
             quote = None if quote == character else (character if quote is None else quote)
-        elif quote is None:
-            if character in "[{":
-                depth += 1
-            elif character in "]}":
-                depth -= 1
-            elif character == separator and depth == 0:
-                return text[:index], text[index + 1 :]
+        elif character == "=" and quote is None:
+            return line[:index].strip(), line[index + 1 :].strip()
         escaped = False
-    raise ValueError(f"expected {separator!r} in {text!r}")
+    raise ValueError(f"expected assignment in line: {line}")
 
 
-def _split_items(text: str) -> list[str]:
-    items = []
-    remainder = text.strip()
-    while remainder:
-        try:
-            item, remainder = _split_once(remainder, ",")
-        except ValueError:
-            item, remainder = remainder, ""
-        if item.strip():
-            items.append(item.strip())
-        remainder = remainder.strip()
-    return items
+def _is_agents_key(key: str) -> bool:
+    stripped = key.strip()
+    return stripped == "agents" or stripped in ('"agents"', "'agents'") or stripped.startswith("agents.")
 
 
 def _parse_key(key: str) -> str:
     if _BARE_KEY.fullmatch(key):
         return key
-    value = _parse_value(key)
+    value = _parse_scalar(key)
     if not isinstance(value, str):
         raise ValueError(f"invalid TOML key: {key}")
     return value
 
 
-def _parse_value(value: str) -> object:
+def _parse_scalar(value: str) -> object:
     if value.startswith('"'):
-        return _json.loads(value)
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1]
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    if value.startswith("[") and value.endswith("]"):
-        return [_parse_value(item) for item in _split_items(value[1:-1])]
-    if value.startswith("{") and value.endswith("}"):
-        return {
-            _parse_key(key.strip()): _parse_value(item.strip())
-            for key, item in (_split_once(entry, "=") for entry in _split_items(value[1:-1]))
-        }
-    number = value.replace("_", "")
-    try:
-        return int(number)
-    except ValueError:
         try:
-            return float(number)
-        except ValueError as error:
-            raise ValueError(f"unsupported TOML value: {value}") from error
+            parsed = _json.loads(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(_SUPPORTED_VALUES) from error
+        if isinstance(parsed, str):
+            return parsed
+    elif value.startswith("'") and value.endswith("'") and "'" not in value[1:-1]:
+        return value[1:-1]
+    elif value == "true":
+        return True
+    elif value == "false":
+        return False
+    elif _HEX_INTEGER.fullmatch(value):
+        return int(value.replace("_", ""), 16)
+    elif _DECIMAL_INTEGER.fullmatch(value):
+        return int(value.replace("_", ""), 10)
+    raise ValueError(_SUPPORTED_VALUES)
 
 
 def _format_key(key: str) -> str:
@@ -231,19 +231,11 @@ def _format_key(key: str) -> str:
     return key if _BARE_KEY.fullmatch(key) else _json.dumps(key, ensure_ascii=False)
 
 
-def _format_value(value: object) -> str:
+def _format_scalar(value: object) -> str:
     if isinstance(value, str):
         return _json.dumps(value, ensure_ascii=False)
     if isinstance(value, bool):
         return str(value).lower()
     if isinstance(value, int):
         return str(value)
-    if isinstance(value, float) and _math.isfinite(value):
-        return repr(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_format_value(item) for item in value) + "]"
-    if isinstance(value, dict):
-        return "{ " + ", ".join(
-            f"{_format_key(key)} = {_format_value(item)}" for key, item in sorted(value.items())
-        ) + " }"
-    raise ValueError(f"unsupported agent value: {value!r}")
+    raise ValueError("agent values must be strings, integers, or booleans")
