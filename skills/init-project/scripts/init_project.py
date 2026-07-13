@@ -4,16 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 SCAFFOLD = PACKAGE_ROOT / "scaffold"
 MANAGED_FILES = {
-    ".codex/config.toml",
     ".codex/agents/harness-builder.toml",
     ".codex/agents/harness-librarian.toml",
     ".codex/agents/harness-reviewer.toml",
@@ -46,6 +48,13 @@ def empty_report() -> dict[str, list[str]]:
     return {key: [] for key in REPORT_KEYS}
 
 
+def path_mode(path: Path) -> int | None:
+    try:
+        return path.lstat().st_mode
+    except FileNotFoundError:
+        return None
+
+
 def destination_issue(root: Path, destination: Path, expect_directory: bool) -> str | None:
     try:
         relative = destination.relative_to(root)
@@ -55,22 +64,98 @@ def destination_issue(root: Path, destination: Path, expect_directory: bool) -> 
     current = root
     for index, part in enumerate(relative.parts):
         current /= part
-        if current.is_symlink():
-            return "symlink destination"
-        if not current.exists():
+        mode = path_mode(current)
+        if mode is None:
             continue
+        if stat.S_ISLNK(mode):
+            return "symlink destination"
         is_last = index == len(relative.parts) - 1
-        if not is_last and not current.is_dir():
+        if not is_last and not stat.S_ISDIR(mode):
             return "parent is not a directory"
-        if is_last and current.is_dir() != expect_directory:
-            return "not a directory" if expect_directory else "not a regular file"
+        if is_last and expect_directory and not stat.S_ISDIR(mode):
+            return "not a directory"
+        if is_last and not expect_directory and not stat.S_ISREG(mode):
+            return "not a regular file"
     return None
 
 
-def copy_scaffold(root: Path, dry_run: bool, force: bool) -> dict[str, list[str]]:
-    report = empty_report()
+def probe_git_root(root: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-prefix"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise InitError("Git executable was not found; install Git and retry") from error
+    except (OSError, UnicodeError) as error:
+        raise InitError("Git repository probe failed; verify Git is available") from error
 
-    for source in sorted(SCAFFOLD.rglob("*"), key=lambda path: path.relative_to(SCAFFOLD).as_posix()):
+    if result.returncode == 0:
+        if result.stdout not in ("", "\n"):
+            raise InitError(
+                "target is inside an existing Git repository; rerun with --root at that "
+                "repository's top level"
+            )
+        return root
+    if "not a git repository" in result.stderr.lower():
+        return None
+    raise InitError(
+        f"Git repository probe failed with exit {result.returncode}; "
+        "verify repository state and permissions"
+    )
+
+
+def read_gitignore(root: Path, report: dict[str, list[str]]) -> bytes | None:
+    path = root / ".gitignore"
+    issue = destination_issue(root, path, False)
+    if issue:
+        report["conflicts"].append(f".gitignore ({issue})")
+        return None
+    if not path.exists():
+        return None
+    try:
+        content = path.read_bytes()
+        content.decode("utf-8")
+        return content
+    except UnicodeError as error:
+        raise InitError(".gitignore is not valid UTF-8; convert it to UTF-8 and retry") from error
+    except OSError as error:
+        raise InitError(".gitignore could not be read; verify its permissions") from error
+
+
+def gitignore_content(existing: bytes | None) -> tuple[bytes, list[str]]:
+    content = existing or b""
+    lines = content.decode("utf-8").splitlines()
+    additions = [entry for entry in (".worktrees/", ".DS_Store") if entry not in lines]
+    if not additions:
+        return content, []
+    if b"\r\n" in content:
+        newline = b"\r\n"
+    elif b"\r" in content and b"\n" not in content:
+        newline = b"\r"
+    else:
+        newline = b"\n"
+    separator = b"" if not content or content.endswith((b"\n", b"\r")) else newline
+    appended = newline.join(entry.encode("utf-8") for entry in additions) + newline
+    return content + separator + appended, additions
+
+
+def build_plan(root: Path, force: bool) -> tuple[list[tuple], dict[str, list[str]]]:
+    plan: list[tuple] = []
+    report = empty_report()
+    git_root = probe_git_root(root)
+    gitignore = read_gitignore(root, report)
+
+    if git_root is None:
+        report["created"].append(".git/")
+        plan.append(("git-init", root))
+    else:
+        report["skipped"].append(".git/ (unchanged)")
+
+    for source in sorted(
+        SCAFFOLD.rglob("*"), key=lambda path: path.relative_to(SCAFFOLD).as_posix()
+    ):
         relative = source.relative_to(SCAFFOLD)
         relative_text = relative.as_posix()
         destination = root / relative
@@ -82,126 +167,156 @@ def copy_scaffold(root: Path, dry_run: bool, force: bool) -> dict[str, list[str]
         if source.is_dir():
             if not destination.exists():
                 report["created"].append(f"{relative_text}/")
-                if not dry_run:
-                    destination.mkdir(parents=True, exist_ok=True)
+                plan.append(("mkdir", destination))
             continue
 
         if not destination.exists():
             report["created"].append(relative_text)
-            if not dry_run:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
+            plan.append(("copy-create", source, destination))
             continue
 
-        if destination.read_bytes() == source.read_bytes():
+        current = destination.read_bytes()
+        if current == source.read_bytes():
             report["skipped"].append(f"{relative_text} (unchanged)")
-            continue
-
-        if relative_text not in MANAGED_FILES:
+        elif relative_text not in MANAGED_FILES:
             report["skipped"].append(f"{relative_text} (project-owned; preserved)")
-            continue
-
-        if not force:
+        elif not force:
             report["conflicts"].append(
                 f"{relative_text} (managed file differs; rerun with --force to replace)"
             )
-            continue
-
-        report["replaced"].append(f"{relative_text} (managed conflict replaced with --force)")
-        if not dry_run:
-            shutil.copy2(source, destination)
-
-    return report
-
-
-def probe_git_root(root: Path) -> Path | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as error:
-        raise InitError("Git executable was not found; install Git and retry") from error
-    except (OSError, UnicodeError) as error:
-        raise InitError("Git repository probe failed; verify Git is available") from error
-
-    if result.returncode == 0:
-        top_level = result.stdout.strip()
-        if not top_level:
-            raise InitError("Git repository probe returned no top level")
-        try:
-            resolved_top_level = Path(top_level).resolve()
-        except (OSError, RuntimeError) as error:
-            raise InitError("Git repository top level could not be resolved") from error
-        if resolved_top_level != root:
-            raise InitError(
-                "target is inside an existing Git repository; rerun with --root at that "
-                "repository's top level"
+        else:
+            report["replaced"].append(
+                f"{relative_text} (managed conflict replaced with --force)"
             )
-        return resolved_top_level
+            plan.append(
+                (
+                    "copy-replace",
+                    source,
+                    destination,
+                    current,
+                    stat.S_IMODE(destination.stat().st_mode),
+                )
+            )
 
-    if "not a git repository" in result.stderr.lower():
-        return None
-    raise InitError(
-        f"Git repository probe failed with exit {result.returncode}; "
-        "verify repository state and permissions"
+    if not report["conflicts"]:
+        updated_ignore, additions = gitignore_content(gitignore)
+        ignore_path = root / ".gitignore"
+        if gitignore is None:
+            report["created"].append(".gitignore")
+            plan.append(("write-create", ignore_path, updated_ignore, 0o644))
+        elif additions:
+            report["created"].append(".gitignore entries: " + ", ".join(additions))
+            plan.append(
+                (
+                    "write-replace",
+                    ignore_path,
+                    updated_ignore,
+                    gitignore,
+                    stat.S_IMODE(ignore_path.stat().st_mode),
+                )
+            )
+        else:
+            report["skipped"].append(".gitignore entries (unchanged)")
+
+    return plan, report
+
+
+def temporary_path(destination: Path) -> tuple[int, Path]:
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{destination.name}.init-project-", dir=destination.parent
     )
+    return descriptor, Path(name)
 
 
-def preflight_gitignore(root: Path) -> str | None:
-    path = root / ".gitignore"
-    issue = destination_issue(root, path, False)
-    if issue:
-        raise InitError(f".gitignore cannot be updated: {issue}")
-    if not path.exists():
-        return None
+def atomic_copy(source: Path, destination: Path) -> None:
+    descriptor, temporary = temporary_path(destination)
+    os.close(descriptor)
     try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeError as error:
-        raise InitError(".gitignore is not valid UTF-8; convert it to UTF-8 and retry") from error
-    except OSError as error:
-        raise InitError(".gitignore could not be read; verify its permissions") from error
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def ensure_git(root: Path, dry_run: bool, git_root: Path | None) -> dict[str, list[str]]:
-    report = empty_report()
-    if git_root is not None:
-        report["skipped"].append(".git/ (unchanged)")
+def atomic_write(destination: Path, content: bytes, mode: int) -> None:
+    descriptor, temporary = temporary_path(destination)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def remove_created(path: Path) -> None:
+    mode = path_mode(path)
+    if mode is None:
+        return
+    if stat.S_ISDIR(mode):
+        shutil.rmtree(path)
     else:
-        report["created"].append(".git/")
-        if not dry_run:
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    return report
+        path.unlink()
 
 
-def ensure_gitignore(root: Path, dry_run: bool, existing: str | None) -> dict[str, list[str]]:
-    report = empty_report()
-    path = root / ".gitignore"
-    content = existing or ""
-    additions = [entry for entry in (".worktrees/", ".DS_Store") if entry not in content.splitlines()]
-    if existing is None:
-        report["created"].append(".gitignore")
-    elif additions:
-        report["created"].append(".gitignore entries: " + ", ".join(additions))
-    else:
-        report["skipped"].append(".gitignore entries (unchanged)")
-
-    if not dry_run and (additions or existing is None):
-        separator = "" if not content or content.endswith("\n") else "\n"
-        suffix = "\n".join(additions)
-        if suffix:
-            suffix += "\n"
-        path.write_text(content + separator + suffix, encoding="utf-8")
-    return report
+def rollback(journal: list[tuple]) -> bool:
+    complete = True
+    for entry in reversed(journal):
+        action, path, *details = entry
+        try:
+            if action == "remove":
+                remove_created(path)
+            elif action == "rmdir":
+                path.rmdir()
+            elif action == "restore":
+                atomic_write(path, details[0], details[1])
+        except OSError:
+            complete = False
+    return complete
 
 
-def merge_reports(*reports: dict[str, list[str]]) -> dict[str, list[str]]:
-    merged = empty_report()
-    for report in reports:
-        for key in REPORT_KEYS:
-            merged[key].extend(report[key])
-    return merged
+def execute_plan(root: Path, plan: list[tuple]) -> None:
+    journal: list[tuple] = []
+    try:
+        for entry in plan:
+            action, *details = entry
+            if action == "git-init":
+                git_path = root / ".git"
+                try:
+                    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+                except (OSError, subprocess.CalledProcessError):
+                    if path_mode(git_path) is not None:
+                        remove_created(git_path)
+                    raise
+                journal.append(("remove", git_path))
+            elif action == "mkdir":
+                path = details[0]
+                path.mkdir()
+                journal.append(("rmdir", path))
+            elif action == "copy-create":
+                source, destination = details
+                atomic_copy(source, destination)
+                journal.append(("remove", destination))
+            elif action == "copy-replace":
+                source, destination, old_content, old_mode = details
+                atomic_copy(source, destination)
+                journal.append(("restore", destination, old_content, old_mode))
+            elif action == "write-create":
+                destination, content, mode = details
+                atomic_write(destination, content, mode)
+                journal.append(("remove", destination))
+            elif action == "write-replace":
+                destination, content, old_content, old_mode = details
+                atomic_write(destination, content, old_mode)
+                journal.append(("restore", destination, old_content, old_mode))
+            else:
+                raise OSError("unknown initialization action")
+    except (OSError, UnicodeError, subprocess.CalledProcessError) as error:
+        restored = rollback(journal)
+        state = "all initializer changes were rolled back" if restored else "rollback was incomplete"
+        raise InitError(f"write failed; {state}") from error
 
 
 def print_report(report: dict[str, list[str]]) -> None:
@@ -228,13 +343,12 @@ def main() -> int:
         return 2
 
     try:
-        git_root = probe_git_root(root)
-        gitignore = preflight_gitignore(root)
-        report = merge_reports(
-            ensure_git(root, args.dry_run, git_root),
-            copy_scaffold(root, args.dry_run, args.force),
-            ensure_gitignore(root, args.dry_run, gitignore),
-        )
+        plan, report = build_plan(root, args.force)
+        if report["conflicts"]:
+            print_report(report)
+            return 1
+        if not args.dry_run:
+            execute_plan(root, plan)
     except InitError as error:
         print(f"init-project failed: {error}", file=sys.stderr)
         return 2
@@ -243,7 +357,7 @@ def main() -> int:
         return 2
 
     print_report(report)
-    return 1 if report["conflicts"] else 0
+    return 0
 
 
 if __name__ == "__main__":

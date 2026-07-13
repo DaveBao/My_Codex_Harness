@@ -1,8 +1,11 @@
+import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,20 +13,43 @@ SCRIPT = ROOT / "skills/init-project/scripts/init_project.py"
 SCAFFOLD = ROOT / "scaffold"
 
 
-def run_init(root: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run_init(
+    root: Path,
+    *args: str,
+    cwd: Path | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--root", str(root), *args],
         cwd=cwd or ROOT,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 
-def tree_snapshot(root: Path) -> dict[str, bytes | None]:
-    return {
-        path.relative_to(root).as_posix(): None if path.is_dir() else path.read_bytes()
-        for path in sorted(root.rglob("*"))
-    }
+def tree_snapshot(root: Path) -> dict[str, bytes | str | None]:
+    snapshot: dict[str, bytes | str | None] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            snapshot[relative] = f"symlink:{os.readlink(path)}"
+        elif path.is_dir():
+            snapshot[relative] = None
+        elif path.is_file():
+            snapshot[relative] = path.read_bytes()
+        else:
+            snapshot[relative] = "special"
+    return snapshot
+
+
+def load_initializer():
+    spec = importlib.util.spec_from_file_location("harness_init_project", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise AssertionError("unable to load initializer")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class InitProjectTests(unittest.TestCase):
@@ -182,7 +208,6 @@ class InitProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
             managed = (
-                ".codex/config.toml",
                 ".codex/agents/harness-builder.toml",
                 "docs/references/builder-handoff.schema.json",
                 "docs/references/worklog-events.md",
@@ -201,6 +226,121 @@ class InitProjectTests(unittest.TestCase):
                 self.assertEqual((SCAFFOLD / relative).read_bytes(), (target / relative).read_bytes())
             self.assertEqual("local project map\n", project_map.read_text())
             self.assertIn("replaced:", result.stdout)
+
+    def test_existing_project_codex_config_is_preserved_with_force(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            config = target / ".codex/config.toml"
+            config.parent.mkdir(parents=True)
+            original = (
+                b'features = ["custom"]\n\n[agents]\nmax_threads = 99\n\n'
+                b'[unrelated]\nenabled = true\n'
+            )
+            config.write_bytes(original)
+
+            result = run_init(target, "--force")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(original, config.read_bytes())
+            self.assertIn(".codex/config.toml (project-owned; preserved)", result.stdout)
+
+    def test_predictable_conflicts_make_actual_and_dry_run_zero_write(self):
+        for conflict_kind in ("managed", "symlink_parent"):
+            for dry_run in (False, True):
+                with (
+                    self.subTest(conflict_kind=conflict_kind, dry_run=dry_run),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    base = Path(directory)
+                    target = base / "target"
+                    target.mkdir()
+                    if conflict_kind == "managed":
+                        conflict = target / "docs/references/builder-handoff.schema.json"
+                        conflict.parent.mkdir(parents=True)
+                        conflict.write_text('{"local":true}\n')
+                    else:
+                        outside = base / "outside"
+                        outside.mkdir()
+                        (target / "docs").symlink_to(outside, target_is_directory=True)
+                    before = tree_snapshot(base)
+
+                    args = ("--dry-run",) if dry_run else ()
+                    result = run_init(target, *args)
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual(before, tree_snapshot(base))
+                    self.assertFalse((target / ".git").exists())
+                    self.assertFalse((target / ".gitignore").exists())
+                    self.assertIn("conflicts:", result.stdout)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO is unavailable on this platform")
+    def test_special_file_destinations_fail_preflight_without_hanging_or_writing(self):
+        for relative in (".gitignore", "AGENTS.md"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)
+                fifo = target / relative
+                fifo.parent.mkdir(parents=True, exist_ok=True)
+                os.mkfifo(fifo)
+                before = tree_snapshot(target)
+
+                try:
+                    result = run_init(target, timeout=1)
+                except subprocess.TimeoutExpired as error:
+                    self.fail(f"initializer opened and blocked on FIFO {relative}: {error}")
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(before, tree_snapshot(target))
+                self.assertIn("not a regular file", result.stderr + result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_git_root_with_trailing_space_is_not_misclassified_as_nested(self):
+        if os.name == "nt":
+            self.skipTest("Windows paths cannot reliably preserve trailing spaces")
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "repo "
+            target.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+
+            result = run_init(target)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((target / "AGENTS.md").is_file())
+
+    def test_gitignore_preserves_existing_crlf_bytes_when_appending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            ignore = target / ".gitignore"
+            ignore.write_bytes(b"dist/\r\n")
+
+            result = run_init(target)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                b"dist/\r\n.worktrees/\r\n.DS_Store\r\n",
+                ignore.read_bytes(),
+            )
+
+    def test_write_failure_rolls_back_only_initializer_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            before = tree_snapshot(target)
+            initializer = load_initializer()
+            plan, _report = initializer.build_plan(target, force=False)
+            real_atomic_copy = initializer.atomic_copy
+            calls = 0
+
+            def fail_second_copy(source, destination):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("injected write failure")
+                return real_atomic_copy(source, destination)
+
+            with mock.patch.object(initializer, "atomic_copy", side_effect=fail_second_copy):
+                with self.assertRaisesRegex(initializer.InitError, "write failed"):
+                    initializer.execute_plan(target, plan)
+
+            self.assertEqual(before, tree_snapshot(target))
 
     def test_second_run_is_idempotent_and_reports_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -286,11 +426,18 @@ class InitProjectTests(unittest.TestCase):
         for name in ("builder-handoff.schema.json", "lifecycle-event.schema.json"):
             self.assertEqual((ROOT / "schemas" / name).read_bytes(), (SCAFFOLD / "docs/references" / name).read_bytes())
         for name in ("builder", "reviewer", "librarian"):
-            text = (SCAFFOLD / f".codex/agents/harness-{name}.toml").read_text()
+            scaffold_agent = SCAFFOLD / f".codex/agents/harness-{name}.toml"
+            root_agent = ROOT / f"agents/harness-{name}.toml"
+            self.assertEqual(root_agent.read_bytes(), scaffold_agent.read_bytes())
+            text = scaffold_agent.read_text()
             self.assertIn(f'name = "harness-{name}"', text)
             self.assertNotIn(str(Path.home()), text)
         self.assertEqual(b"", (SCAFFOLD / "worklog/handoffs.jsonl").read_bytes())
         self.assertEqual(b"", (SCAFFOLD / "worklog/logs/lifecycle.jsonl").read_bytes())
+
+    def test_skill_documents_project_owned_codex_config_boundary(self):
+        skill = (ROOT / "skills/init-project/SKILL.md").read_text()
+        self.assertIn("`.codex/config.toml` is project-owned once created", skill)
 
 
 if __name__ == "__main__":
