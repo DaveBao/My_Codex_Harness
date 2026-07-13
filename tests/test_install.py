@@ -38,6 +38,19 @@ def run_script(script: Path, home: Path, *args: str) -> subprocess.CompletedProc
     )
 
 
+def run_python(home: Path, code: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
 def snapshot(root: Path) -> dict[str, bytes | str | None]:
     result: dict[str, bytes | str | None] = {}
     for path in sorted(root.rglob("*")):
@@ -71,6 +84,21 @@ def copy_source(root: Path, version: str) -> Path:
     manifest["version"] = version
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return source
+
+
+def leave_upgrade_cleanup_warning(installer, source: Path, home: Path) -> dict:
+    original = installer.remove_path
+
+    def fail_cleanup(path: Path) -> None:
+        if ".rollback-" in path.name:
+            raise OSError("cleanup warning")
+        original(path)
+
+    installer.remove_path = fail_cleanup
+    try:
+        return installer.install_package(source, home, force_copy=True)
+    finally:
+        installer.remove_path = original
 
 
 class InstallTests(unittest.TestCase):
@@ -251,6 +279,163 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(journal_paths)
             journal_file = next(home / path for path in journal_paths if path.endswith(".json"))
             self.assertEqual("rolled-back", json.loads(journal_file.read_text())["status"])
+
+    def test_next_install_recovers_process_exit_after_package_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_install', root / 'scripts/install.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+def stop(action, _path):
+    if action == 'package-installed':
+        os._exit(93)
+module.install_package(root, Path(os.environ['HOME']), force_copy=True, mutation_hook=stop)
+""",
+            )
+            self.assertEqual(93, interrupted.returncode)
+            self.assertTrue((home / ".codex/plugins/my-codex-harness").is_dir())
+            self.assertFalse((home / STATE_RELATIVE).exists())
+
+            recovered = run_script(INSTALL, home, "--yes", "--copy")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertTrue((home / STATE_RELATIVE).is_file())
+            journals = sorted((home / ".codex/my-codex-harness/journals").glob("install-*.json"))
+            self.assertEqual("rolled-back", json.loads(journals[0].read_text())["status"])
+
+    def test_dry_run_reports_pending_recovery_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_install', root / 'scripts/install.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.install_package(root, Path(os.environ['HOME']), force_copy=True,
+    mutation_hook=lambda action, _path: os._exit(93) if action == 'package-installed' else None)
+""",
+            )
+            self.assertEqual(93, interrupted.returncode)
+            before = snapshot(home)
+
+            preview = run_script(INSTALL, home, "--dry-run", "--copy")
+
+            self.assertNotEqual(0, preview.returncode)
+            self.assertIn("recovery required", preview.stderr.lower())
+            self.assertEqual(before, snapshot(home))
+
+    def test_install_recovery_preserves_unknown_drift_and_stays_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_install', root / 'scripts/install.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.install_package(root, Path(os.environ['HOME']), force_copy=True,
+    mutation_hook=lambda action, _path: os._exit(93) if action == 'package-installed' else None)
+""",
+            )
+            self.assertEqual(93, interrupted.returncode)
+            drift = home / ".codex/plugins/my-codex-harness/local-drift"
+            drift.write_text("keep\n")
+
+            recovered = run_script(INSTALL, home, "--yes", "--copy")
+
+            self.assertNotEqual(0, recovered.returncode)
+            self.assertEqual("keep\n", drift.read_text())
+            journal = next((home / ".codex/my-codex-harness/journals").glob("install-*.json"))
+            self.assertEqual("rollback-incomplete", json.loads(journal.read_text())["status"])
+            self.assertIn("preserved drifted", recovered.stderr.lower())
+
+    def test_install_recovery_never_rolls_back_committed_state_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_install', root / 'scripts/install.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.install_package(root, Path(os.environ['HOME']), force_copy=True,
+    mutation_hook=lambda action, _path: os._exit(94) if action == 'state-written' else None)
+""",
+            )
+            self.assertEqual(94, interrupted.returncode)
+            state_path = home / STATE_RELATIVE
+            state_before = json.loads(state_path.read_text())
+            package_hash = load_script("install.py").hash_path(
+                home / ".codex/plugins/my-codex-harness"
+            )
+
+            recovered = run_script(INSTALL, home, "--yes", "--copy")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertEqual(package_hash, load_script("install.py").hash_path(
+                home / ".codex/plugins/my-codex-harness"
+            ))
+            self.assertEqual(state_before["hashes"], json.loads(state_path.read_text())["hashes"])
+            journal = home / state_before["lastJournal"]
+            self.assertEqual("completed", json.loads(journal.read_text())["status"])
+
+    def test_committed_install_recovery_rejects_json_cleanup_path_outside_backup_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_install', root / 'scripts/install.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.install_package(root, Path(os.environ['HOME']), force_copy=True,
+    mutation_hook=lambda action, _path: os._exit(99) if action == 'state-written' else None)
+""",
+            )
+            self.assertEqual(99, interrupted.returncode)
+            installer = load_script("install.py")
+            state_path = home / STATE_RELATIVE
+            state = json.loads(state_path.read_text())
+            config = home / ".codex/config.toml"
+            state["cleanupBackups"] = [
+                {"path": ".codex/config.toml", "sha256": installer.hash_path(config)}
+            ]
+            state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+            journal_path = home / state["lastJournal"]
+            journal = json.loads(journal_path.read_text())
+            journal["actions"][-1]["newHash"] = installer.hash_path(state_path)
+            journal_path.write_text(json.dumps(journal, indent=2, sort_keys=True) + "\n")
+            config_before = config.read_bytes()
+
+            recovered = run_script(INSTALL, home, "--yes", "--copy")
+
+            self.assertNotEqual(0, recovered.returncode)
+            self.assertEqual(config_before, config.read_bytes())
+            self.assertIn("cleanup backup", recovered.stderr.lower())
 
     def test_rollback_preserves_and_reports_unknown_drift(self):
         installer = load_script("install.py")
@@ -501,6 +686,81 @@ class InstallTests(unittest.TestCase):
             journal = home / saved["lastJournal"]
             self.assertEqual("cleanup-incomplete", json.loads(journal.read_text())["status"])
 
+    def test_next_install_resumes_cleanup_from_warning_updated_committed_state(self):
+        installer = load_script("install.py")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            installer.install_package(ROOT, home, force_copy=True)
+            source = copy_source(base, "0.2.0")
+            warned = leave_upgrade_cleanup_warning(installer, source, home)
+            self.assertTrue(warned["cleanupIncomplete"])
+            warned_state = json.loads((home / STATE_RELATIVE).read_text())
+            self.assertTrue(warned_state["cleanupBackups"])
+
+            recovered = installer.install_package(source, home, force_copy=True)
+
+            self.assertTrue(recovered["idempotent"])
+            state = json.loads((home / STATE_RELATIVE).read_text())
+            self.assertEqual([], state["cleanupBackups"])
+            self.assertFalse(state["cleanupIncomplete"])
+            self.assertEqual([], state["installWarnings"])
+
+    def test_warning_state_recovery_rejects_unknown_owned_hash_drift_without_cleanup(self):
+        installer = load_script("install.py")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            installer.install_package(ROOT, home, force_copy=True)
+            source = copy_source(base, "0.2.0")
+            leave_upgrade_cleanup_warning(installer, source, home)
+            state_path = home / STATE_RELATIVE
+            state = json.loads(state_path.read_text())
+            state["hashes"][".codex/plugins/my-codex-harness"] = "0" * 64
+            state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+            before = snapshot(home)
+
+            with self.assertRaisesRegex(ValueError, "managed path drift"):
+                installer.install_package(source, home, force_copy=True)
+
+            self.assertEqual(before, snapshot(home))
+
+    def test_upgrade_cleanup_resumes_after_process_exit_between_remove_and_state_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            installed = run_script(INSTALL, home, "--yes", "--copy")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            source = copy_source(base, "0.2.0")
+            interrupted = run_python(
+                home,
+                f"""
+import importlib.util
+import os
+from pathlib import Path
+source = Path({str(source)!r})
+spec = importlib.util.spec_from_file_location('interrupted_upgrade', source / 'scripts/install.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+remove = module.remove_path
+def stop(path):
+    remove(path)
+    if '.rollback-' in path.name:
+        os._exit(100)
+module.remove_path = stop
+module.install_package(source, Path(os.environ['HOME']), force_copy=True)
+""",
+            )
+            self.assertEqual(100, interrupted.returncode)
+            self.assertEqual("0.2.0", json.loads((home / STATE_RELATIVE).read_text())["version"])
+
+            recovered = run_script(source / "scripts/install.py", home, "--yes", "--copy")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            state = json.loads((home / STATE_RELATIVE).read_text())
+            self.assertEqual([], state["cleanupBackups"])
+            self.assertFalse(state["cleanupIncomplete"])
+
     def test_upgrade_can_add_then_remove_skills_with_exact_ownership(self):
         installer = load_script("install.py")
         with tempfile.TemporaryDirectory() as directory:
@@ -684,6 +944,230 @@ class InstallTests(unittest.TestCase):
                 uninstaller.atomic_write_bytes = original
             self.assertEqual(before, config.read_bytes())
             self.assertTrue((home / STATE_RELATIVE).is_file())
+
+    def test_next_uninstall_finishes_committed_cleanup_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = run_script(INSTALL, home, "--yes", "--copy")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_uninstall', root / 'scripts/uninstall.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+remove = module.remove_path
+def stop(path):
+    remove(path)
+    if '.uninstall-' in path.name:
+        os._exit(95)
+module.remove_path = stop
+module.uninstall_package(Path(os.environ['HOME']))
+""",
+            )
+            self.assertEqual(95, interrupted.returncode)
+            self.assertFalse((home / STATE_RELATIVE).exists())
+            self.assertTrue(list((home / STATE_RELATIVE.parent).glob(".install-state.rollback-*.json")))
+            self.assertTrue(list(home.rglob("*.uninstall-*")))
+
+            recovered = run_script(UNINSTALL, home, "--yes")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertFalse(list((home / STATE_RELATIVE.parent).glob(".install-state.rollback-*.json")))
+            self.assertFalse(list(home.rglob("*.uninstall-*")))
+            self.assertFalse((home / ".codex/plugins/my-codex-harness").exists())
+
+    def test_next_uninstall_recovers_process_exit_after_partial_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = run_script(INSTALL, home, "--yes", "--copy")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_uninstall', root / 'scripts/uninstall.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+replace = module.os.replace
+def stop(old, new):
+    result = replace(old, new)
+    if '.uninstall-' in Path(new).name:
+        os._exit(96)
+    return result
+module.os.replace = stop
+module.uninstall_package(Path(os.environ['HOME']))
+""",
+            )
+            self.assertEqual(96, interrupted.returncode)
+            self.assertTrue((home / STATE_RELATIVE).is_file())
+
+            recovered = run_script(UNINSTALL, home, "--yes")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertFalse((home / STATE_RELATIVE).exists())
+            self.assertFalse(list(home.rglob("*.uninstall-*")))
+
+    def test_next_uninstall_recovers_process_exit_after_config_backup_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = run_script(INSTALL, home, "--yes", "--copy")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_uninstall', root / 'scripts/uninstall.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+write = module.atomic_write_bytes
+def stop(path, content):
+    write(path, content)
+    if 'config.toml.uninstall-' in path.name:
+        os._exit(101)
+module.atomic_write_bytes = stop
+module.uninstall_package(Path(os.environ['HOME']))
+""",
+            )
+            self.assertEqual(101, interrupted.returncode)
+            self.assertTrue((home / STATE_RELATIVE).is_file())
+
+            recovered = run_script(UNINSTALL, home, "--yes")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            backups = home / ".codex/my-codex-harness/backups"
+            self.assertFalse(list(backups.glob("config.toml.uninstall-*")))
+
+    def test_next_uninstall_treats_moved_state_as_committed_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = run_script(INSTALL, home, "--yes", "--copy")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_uninstall', root / 'scripts/uninstall.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+replace = module.os.replace
+state = Path(os.environ['HOME']) / '.codex/my-codex-harness/install-state.json'
+def stop(old, new):
+    result = replace(old, new)
+    if Path(old) == state and '.install-state.rollback-' in Path(new).name:
+        os._exit(97)
+    return result
+module.os.replace = stop
+module.uninstall_package(Path(os.environ['HOME']))
+""",
+            )
+            self.assertEqual(97, interrupted.returncode)
+            self.assertFalse((home / STATE_RELATIVE).exists())
+            self.assertTrue(list((home / STATE_RELATIVE.parent).glob(".install-state.rollback-*.json")))
+
+            recovered = run_script(UNINSTALL, home, "--yes")
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertFalse(list((home / STATE_RELATIVE.parent).glob(".install-state.rollback-*.json")))
+            self.assertFalse(list(home.rglob("*.uninstall-*")))
+
+    def test_uninstall_recovery_preserves_drifted_cleanup_backup_and_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = run_script(INSTALL, home, "--yes", "--copy")
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            interrupted = run_python(
+                home,
+                """
+import importlib.util
+import os
+from pathlib import Path
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location('interrupted_uninstall', root / 'scripts/uninstall.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+remove = module.remove_path
+def stop(path):
+    remove(path)
+    if '.uninstall-' in path.name:
+        os._exit(98)
+module.remove_path = stop
+module.uninstall_package(Path(os.environ['HOME']))
+""",
+            )
+            self.assertEqual(98, interrupted.returncode)
+            backup = next(home.rglob("*.uninstall-*"))
+            if backup.is_dir():
+                (backup / "external-drift").write_text("keep\n")
+            else:
+                backup.write_text("keep\n")
+
+            recovered = run_script(UNINSTALL, home, "--yes")
+
+            self.assertNotEqual(0, recovered.returncode)
+            self.assertTrue(backup.exists())
+            self.assertTrue(list((home / STATE_RELATIVE.parent).glob(".install-state.rollback-*.json")))
+            self.assertIn("drifted uninstall backup", recovered.stderr.lower())
+
+    def test_uninstall_without_state_is_not_idempotent_when_managed_backup_remains(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            leftover = home / ".codex/agents/.harness-builder.toml.uninstall-20260713T120000000000Z"
+            leftover.parent.mkdir(parents=True)
+            leftover.write_text("managed backup\n")
+
+            result = run_script(UNINSTALL, home, "--yes")
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual("managed backup\n", leftover.read_text())
+            self.assertIn("leftover", result.stderr.lower())
+
+    def test_uninstall_recovery_rejects_json_path_as_delete_authority(self):
+        installer = load_script("install.py")
+        uninstaller = load_script("uninstall.py")
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installer.install_package(ROOT, home, force_copy=True)
+            original = uninstaller.remove_path
+
+            def fail_cleanup(path: Path) -> None:
+                if ".uninstall-" in path.name:
+                    raise OSError("leave recovery")
+                original(path)
+
+            uninstaller.remove_path = fail_cleanup
+            try:
+                with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                    uninstaller.uninstall_package(home)
+            finally:
+                uninstaller.remove_path = original
+            journal_path = next(
+                (home / ".codex/my-codex-harness/journals").glob("uninstall-*.json")
+            )
+            journal = json.loads(journal_path.read_text())
+            journal["moves"][0]["backup"] = ".codex/config.toml"
+            journal_path.write_text(json.dumps(journal, indent=2, sort_keys=True) + "\n")
+            config = home / ".codex/config.toml"
+            before = config.read_bytes()
+
+            recovered = run_script(UNINSTALL, home, "--yes")
+
+            self.assertNotEqual(0, recovered.returncode)
+            self.assertEqual(before, config.read_bytes())
+            self.assertIn("invalid uninstall recovery backup", recovered.stderr.lower())
 
     def test_ownership_hashes_do_not_ignore_sensitive_looking_local_drift(self):
         with tempfile.TemporaryDirectory() as directory:

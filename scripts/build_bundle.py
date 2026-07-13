@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from deploy_model import (  # noqa: E402
+    DESIRED_AGENTS,
     atomic_write_bytes,
     atomic_write_json,
     package_files,
@@ -50,6 +51,7 @@ def build_bundle(package_root: Path, output: Path) -> tuple[Path, Path, Path]:
     manifest = {
         "version": version,
         "sourceCommit": source_commit(package_root),
+        "desiredAgents": dict(DESIRED_AGENTS),
         "files": {relative.as_posix(): _file_hash(package_root / relative) for relative in files},
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()

@@ -14,6 +14,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts/build_bundle.py"
 DOCTOR = ROOT / "scripts/doctor.py"
+INSTALL = ROOT / "scripts/install.py"
+DESIRED_AGENTS = {
+    "max_depth": 1,
+    "max_threads": 6,
+    "interrupt_message": True,
+}
 
 
 def run_builder(output: Path) -> subprocess.CompletedProcess[str]:
@@ -34,8 +40,33 @@ def load_doctor():
     return module
 
 
+def run_doctor(home: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.update({"HOME": str(home), "USERPROFILE": str(home)})
+    return subprocess.run(
+        [sys.executable, str(DOCTOR), *arguments],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def bundle_manifest(files: dict[str, str]) -> dict:
+    return {
+        "version": "0.1.0",
+        "sourceCommit": "test",
+        "desiredAgents": DESIRED_AGENTS,
+        "files": files,
+    }
+
+
 def write_custom_bundle(
-    directory: Path, entries: list[tuple[str, bytes | None | str]], manifest: dict
+    directory: Path,
+    entries: list[tuple[str, bytes | None | str]],
+    manifest: dict,
+    *,
+    external_manifest: dict | None = None,
 ) -> Path:
     archive = directory / "custom.tar.gz"
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
@@ -54,7 +85,11 @@ def write_custom_bundle(
         info = tarfile.TarInfo("root/bundle-manifest.json")
         info.size = len(manifest_bytes)
         stream.addfile(info, io.BytesIO(manifest_bytes))
-    (directory / "bundle-manifest.json").write_bytes(manifest_bytes)
+    external_bytes = (
+        json.dumps(external_manifest if external_manifest is not None else manifest, indent=2, sort_keys=True)
+        + "\n"
+    ).encode()
+    (directory / "bundle-manifest.json").write_bytes(external_bytes)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (directory / "custom.tar.gz.sha256").write_text(f"{digest}  custom.tar.gz\n")
     return archive
@@ -78,9 +113,211 @@ class BundleTests(unittest.TestCase):
             digest = hashlib.sha256(archive_one.read_bytes()).hexdigest()
             self.assertEqual(f"{digest}  {archive_name}\n", (first / f"{archive_name}.sha256").read_text())
             manifest = json.loads((first / "bundle-manifest.json").read_text())
+            self.assertEqual(
+                {"version", "sourceCommit", "desiredAgents", "files"}, set(manifest)
+            )
             self.assertEqual("0.1.0", manifest["version"])
             self.assertIn("sourceCommit", manifest)
+            self.assertEqual(DESIRED_AGENTS, manifest["desiredAgents"])
             self.assertTrue(manifest["files"])
+
+    def test_doctor_validates_complex_toml_with_stdlib_and_lexical_fallback(self):
+        doctor = load_doctor()
+        config = '''
+# common Codex configuration forms
+model = "gpt-5"
+features = ["one", { name = "two", enabled = true }]
+prompt = """
+# brackets inside multiline strings are data
+[not.a.table]
+"""
+literal = ''' + "'''\nliteral # text\n'''" + '''
+
+[agents]
+max_threads = 6
+interrupt_message = true
+
+[profiles."team.alpha"]
+args = [
+  "--flag",
+]
+environment = { KEY = "value#kept", nested = { enabled = true } }
+
+["dotted"."table"]
+"quoted.key".value = "ok"
+
+[[tools]]
+name = 'one'
+'''
+        doctor._validate_toml_parseability(config)
+        original = doctor.tomllib
+        doctor.tomllib = None
+        try:
+            doctor._validate_toml_parseability(config)
+        finally:
+            doctor.tomllib = original
+
+    def test_doctor_rejects_lexically_unparseable_toml_with_fallback(self):
+        doctor = load_doctor()
+        invalid = (
+            "[broken\nvalue = [\n",
+            'value = "unterminated\n',
+            'value = "bad' + "\\" + '\ncontinuation"\n',
+            "value = [1, 2\n",
+            "value = { nested = true\n",
+        )
+        original = doctor.tomllib
+        doctor.tomllib = None
+        try:
+            for config in invalid:
+                with self.subTest(config=config), self.assertRaises(ValueError):
+                    doctor._validate_toml_parseability(config)
+        finally:
+            doctor.tomllib = original
+
+    def test_doctor_cli_rejects_invalid_config_toml(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / ".codex/config.toml"
+            config.parent.mkdir()
+            config.write_text("[broken\nvalue = [\n")
+
+            result = run_doctor(home)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("toml", result.stderr.lower())
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not authoritative on Windows")
+    def test_doctor_rejects_existing_nonwritable_user_directories_by_mode_bits(self):
+        doctor = load_doctor()
+        for name in (".codex", ".agents"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                target = home / name
+                target.mkdir()
+                target.chmod(0o555)
+                try:
+                    with self.assertRaisesRegex(ValueError, "writable"):
+                        doctor._check_prerequisites(home, False)
+                finally:
+                    target.chmod(0o755)
+
+    def test_doctor_write_probes_leave_missing_user_directories_absent(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            doctor._check_prerequisites(home, False)
+            self.assertEqual([], list(home.iterdir()))
+
+    def test_doctor_rejects_symlinked_user_directory(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            outside = base / "outside"
+            home.mkdir()
+            outside.mkdir()
+            try:
+                (home / ".codex").symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlink unavailable: {error}")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                doctor._check_prerequisites(home, False)
+
+    def test_doctor_validates_all_required_install_state_fields_and_consistency(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state_path = home / ".codex/my-codex-harness/install-state.json"
+            state = json.loads(state_path.read_text())
+            doctor._validate_install_state(home, state)
+
+            invalid_values = {
+                "version": "",
+                "sourceCommit": "",
+                "mode": "attacker",
+                "ownedPaths": {},
+                "hashes": [],
+                "createdPaths": {},
+                "replacedPaths": {},
+                "backups": {},
+                "addedConfigKeys": [],
+                "preservedConfigKeys": [],
+                "lastJournal": "",
+                "cleanupBackups": {},
+                "cleanupIncomplete": "false",
+                "installWarnings": {},
+            }
+            for field, invalid in invalid_values.items():
+                candidate = json.loads(json.dumps(state))
+                candidate[field] = invalid
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    doctor._validate_install_state(home, candidate)
+
+            inconsistent = json.loads(json.dumps(state))
+            inconsistent["hashes"].pop(next(iter(inconsistent["hashes"])))
+            with self.assertRaises(ValueError):
+                doctor._validate_install_state(home, inconsistent)
+
+            inconsistent = json.loads(json.dumps(state))
+            inconsistent["replacedPaths"] = [inconsistent["createdPaths"][0]]
+            with self.assertRaises(ValueError):
+                doctor._validate_install_state(home, inconsistent)
+
+    def test_doctor_installed_rejects_missing_identity_or_untrusted_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            state_path = home / ".codex/my-codex-harness/install-state.json"
+            original = json.loads(state_path.read_text())
+            cases = (("version", None), ("sourceCommit", None), ("mode", "attacker"))
+            for field, value in cases:
+                candidate = json.loads(json.dumps(original))
+                if value is None:
+                    candidate.pop(field)
+                else:
+                    candidate[field] = value
+                state_path.write_text(json.dumps(candidate))
+                with self.subTest(field=field):
+                    result = run_doctor(home, "--installed")
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("install state", result.stderr.lower())
+            state_path.write_text(json.dumps(original))
+
+    def test_doctor_installed_accepts_type_correct_preserved_agent_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / ".codex/config.toml"
+            config.parent.mkdir()
+            config.write_text("[agents]\nmax_threads = 22\n")
+            installed = subprocess.run(
+                [sys.executable, str(INSTALL), "--yes", "--copy"],
+                cwd=ROOT,
+                env={**os.environ, "HOME": str(home), "USERPROFILE": str(home)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+
+            result = run_doctor(home, "--installed")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("installation: healthy", result.stdout.lower())
 
     def test_archive_is_sorted_normalized_and_excludes_runtime_or_sensitive_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -210,11 +447,7 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             payload = b"payload\n"
-            manifest = {
-                "version": "0.1.0",
-                "sourceCommit": "test",
-                "files": {"payload.txt": hashlib.sha256(payload).hexdigest()},
-            }
+            manifest = bundle_manifest({"payload.txt": hashlib.sha256(payload).hexdigest()})
             archive = write_custom_bundle(
                 base,
                 [("root/payload.txt", payload), ("root/payload.txt", payload)],
@@ -228,11 +461,7 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             payload = b"payload\n"
-            manifest = {
-                "version": "0.1.0",
-                "sourceCommit": "test",
-                "files": {"payload.txt": hashlib.sha256(payload).hexdigest()},
-            }
+            manifest = bundle_manifest({"payload.txt": hashlib.sha256(payload).hexdigest()})
             archive = write_custom_bundle(
                 base,
                 [("root/payload.txt", payload), ("root/runtime.pipe", None)],
@@ -246,11 +475,7 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             payload = b"payload\n"
-            manifest = {
-                "version": "0.1.0",
-                "sourceCommit": "test",
-                "files": {"payload.txt": hashlib.sha256(payload).hexdigest()},
-            }
+            manifest = bundle_manifest({"payload.txt": hashlib.sha256(payload).hexdigest()})
             archive = write_custom_bundle(
                 base,
                 [("", b"empty-name\n"), ("root/payload.txt", payload)],
@@ -264,11 +489,7 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             payload = b"payload\n"
-            manifest = {
-                "version": "0.1.0",
-                "sourceCommit": "test",
-                "files": {"docs/payload.txt": hashlib.sha256(payload).hexdigest()},
-            }
+            manifest = bundle_manifest({"docs/payload.txt": hashlib.sha256(payload).hexdigest()})
             archive = write_custom_bundle(
                 base,
                 [("root/docs/", "directory"), ("root/docs/payload.txt", payload)],
@@ -281,11 +502,7 @@ class BundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             payload = b"payload\n"
-            manifest = {
-                "version": "0.1.0",
-                "sourceCommit": "test",
-                "files": {"docs//payload.txt": hashlib.sha256(payload).hexdigest()},
-            }
+            manifest = bundle_manifest({"docs//payload.txt": hashlib.sha256(payload).hexdigest()})
             archive = write_custom_bundle(
                 base,
                 [("root/docs//payload.txt", payload)],
@@ -293,6 +510,55 @@ class BundleTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "manifest path"):
                 doctor._verify_bundle(archive)
+
+    def test_bundle_doctor_rejects_invalid_external_manifest_schema(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            payload = b"payload\n"
+            manifest = bundle_manifest({"payload.txt": hashlib.sha256(payload).hexdigest()})
+            archive = write_custom_bundle(base, [("root/payload.txt", payload)], manifest)
+            external = dict(manifest)
+            external.pop("desiredAgents")
+            (base / "bundle-manifest.json").write_text(json.dumps(external))
+            with self.assertRaisesRegex(ValueError, "external bundle manifest"):
+                doctor._verify_bundle(archive)
+
+    def test_bundle_doctor_rejects_invalid_internal_manifest_schema(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            payload = b"payload\n"
+            external = bundle_manifest({"payload.txt": hashlib.sha256(payload).hexdigest()})
+            internal = dict(external)
+            internal["desiredAgents"] = {**DESIRED_AGENTS, "max_threads": 99}
+            archive = write_custom_bundle(
+                base,
+                [("root/payload.txt", payload)],
+                internal,
+                external_manifest=external,
+            )
+            with self.assertRaisesRegex(ValueError, "internal bundle manifest"):
+                doctor._verify_bundle(archive)
+
+    def test_extracted_package_doctor_rejects_incomplete_manifest_schema(self):
+        doctor = load_doctor()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            output = base / "bundle"
+            result = run_builder(output)
+            self.assertEqual(0, result.returncode, result.stderr)
+            extracted = base / "extracted"
+            with tarfile.open(output / "my-codex-harness-0.1.0.tar.gz", "r:gz") as stream:
+                stream.extractall(extracted)
+            package = next(extracted.iterdir())
+            manifest_path = package / "bundle-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["unexpected"] = True
+            manifest_path.write_text(json.dumps(manifest))
+
+            with self.assertRaisesRegex(ValueError, "package manifest"):
+                doctor._verify_extracted_package(package)
 
     def test_bootstrap_stops_on_error_and_orders_doctor_preview_install(self):
         script = (ROOT / "scripts/bootstrap.sh").read_text()

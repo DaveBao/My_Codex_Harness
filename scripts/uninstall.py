@@ -3,6 +3,7 @@
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,22 @@ from package_model import (  # noqa: E402
     _opening_multiline_delimiter,
     _strip_comment,
     parse_agents_table,
+)
+
+
+HASH = re.compile(r"^[0-9a-f]{64}$")
+RECOVERY_TARGET = re.compile(
+    r"(?:\.codex/plugins/my-codex-harness"
+    r"|\.codex/agents/harness-(?:builder|reviewer|librarian)\.toml"
+    r"|\.agents/skills/[A-Za-z0-9][A-Za-z0-9._-]*"
+    r"|\.codex/plugins/\.my-codex-harness\.rollback-[0-9TZ]+"
+    r"|\.agents/skills/\.[A-Za-z0-9][A-Za-z0-9._-]*\.rollback-[0-9TZ]+)"
+)
+RECOVERY_BACKUP = re.compile(
+    r"(?:\.codex/plugins/\.{1,2}my-codex-harness(?:\.rollback-[0-9TZ]+)?"
+    r"|\.codex/agents/\.harness-(?:builder|reviewer|librarian)\.toml"
+    r"|\.agents/skills/\.{1,2}[A-Za-z0-9][A-Za-z0-9._-]*(?:\.rollback-[0-9TZ]+)?)"
+    r"\.uninstall-[0-9TZ]+"
 )
 
 
@@ -57,6 +74,245 @@ def _remove_config_keys(text: str, keys: dict[str, object]) -> str:
         if "=" in stripped:
             multiline = _opening_multiline_delimiter(stripped.split("=", 1)[1].strip())
     return "".join(output)
+
+
+def _relative(home: Path, path: Path) -> str:
+    return path.relative_to(home).as_posix()
+
+
+def _file_hash(content: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"file\0")
+    digest.update(content)
+    return digest.hexdigest()
+
+
+def _recovery_path(home: Path, relative: object, pattern: re.Pattern[str], label: str) -> Path:
+    if not isinstance(relative, str) or not pattern.fullmatch(relative):
+        raise ValueError(f"invalid uninstall recovery {label}")
+    return canonical_owned_path(home, relative)
+
+
+def _write_recovery_journal(path: Path, record: dict) -> None:
+    atomic_write_json(path, record)
+
+
+def _pending_uninstall_journals(home: Path) -> list[tuple[Path, dict]]:
+    journals = home / ".codex/my-codex-harness/journals"
+    validate_target(home, journals)
+    if not journals.exists():
+        return []
+    pending = []
+    for path in sorted(journals.iterdir()):
+        if not re.fullmatch(r"uninstall-[0-9TZ]+\.json", path.name):
+            continue
+        value = load_json_object(path)
+        if value.get("status") in {
+            "running", "committed", "cleanup-incomplete", "rollback-incomplete"
+        }:
+            pending.append((path, value))
+    return pending
+
+
+def _recovery_record(home: Path, journal_path: Path, value: dict) -> dict:
+    timestamp = journal_path.name.removeprefix("uninstall-").removesuffix(".json")
+    if not HASH.fullmatch(value.get("stateHash", "")):
+        raise ValueError("invalid uninstall recovery state hash")
+    expected_state_backup = (
+        f".codex/my-codex-harness/.install-state.rollback-{timestamp}.json"
+    )
+    if value.get("stateBackup") != expected_state_backup:
+        raise ValueError("invalid uninstall recovery state backup")
+    state_backup = canonical_owned_path(home, expected_state_backup)
+    moves = value.get("moves")
+    if not isinstance(moves, list):
+        raise ValueError("invalid uninstall recovery moves")
+    parsed_moves = []
+    for entry in moves:
+        if not isinstance(entry, dict) or set(entry) != {"path", "backup", "sha256"}:
+            raise ValueError("invalid uninstall recovery move")
+        if not isinstance(entry["sha256"], str) or not HASH.fullmatch(entry["sha256"]):
+            raise ValueError("invalid uninstall recovery move hash")
+        path = _recovery_path(home, entry["path"], RECOVERY_TARGET, "target")
+        backup = _recovery_path(home, entry["backup"], RECOVERY_BACKUP, "backup")
+        expected_backup = path.parent / f".{path.name}.uninstall-{timestamp}"
+        if backup != expected_backup:
+            raise ValueError("uninstall recovery backup does not match target")
+        parsed_moves.append({**entry, "targetPath": path, "backupPath": backup})
+    config = value.get("config")
+    parsed_config = None
+    if config is not None:
+        if not isinstance(config, dict) or set(config) != {
+            "path", "backup", "oldHash", "newHash"
+        }:
+            raise ValueError("invalid uninstall recovery config")
+        if config["path"] != ".codex/config.toml" or not all(
+            isinstance(config[key], str) and HASH.fullmatch(config[key])
+            for key in ("oldHash", "newHash")
+        ):
+            raise ValueError("invalid uninstall recovery config data")
+        expected_backup = (
+            f".codex/my-codex-harness/backups/config.toml.uninstall-{timestamp}"
+        )
+        if config["backup"] != expected_backup:
+            raise ValueError("invalid uninstall recovery config backup")
+        parsed_config = {
+            **config,
+            "configPath": canonical_owned_path(home, config["path"]),
+            "backupPath": canonical_owned_path(home, config["backup"]),
+        }
+    return {
+        **value,
+        "_saved": value,
+        "stateBackupPath": state_backup,
+        "moves": parsed_moves,
+        "config": parsed_config,
+    }
+
+
+def _rollback_uninstall(home: Path, journal_path: Path, record: dict) -> None:
+    errors = []
+    config = record["config"]
+    if config is not None:
+        path = config["configPath"]
+        backup = config["backupPath"]
+        current = hash_path(path) if path.exists() else None
+        if current == config["newHash"] and backup.exists() and hash_path(backup) == config["oldHash"]:
+            atomic_write_bytes(path, backup.read_bytes())
+            current = config["oldHash"]
+        elif current != config["oldHash"]:
+            errors.append(f"preserved drifted config: {path}")
+        if backup.exists() and current == config["oldHash"]:
+            if hash_path(backup) == config["oldHash"]:
+                backup.unlink()
+            else:
+                errors.append(f"preserved drifted uninstall backup: {backup}")
+    for entry in reversed(record["moves"]):
+        path = entry["targetPath"]
+        backup = entry["backupPath"]
+        target_hash = hash_path(path) if path.exists() or path.is_symlink() else None
+        backup_hash = hash_path(backup) if backup.exists() or backup.is_symlink() else None
+        if target_hash == entry["sha256"] and backup_hash is None:
+            continue
+        if target_hash is None and backup_hash == entry["sha256"]:
+            os.replace(backup, path)
+        else:
+            errors.append(f"preserved drifted uninstall move: {path}")
+    status = "rollback-incomplete" if errors else "rolled-back"
+    _write_recovery_journal(
+        journal_path, {**record["_saved"], "status": status, "rollbackErrors": errors}
+    )
+    if errors:
+        raise RuntimeError("uninstall recovery incomplete: " + "; ".join(errors))
+
+
+def _finish_uninstall_cleanup(home: Path, journal_path: Path, record: dict) -> None:
+    errors = []
+    for entry in record["moves"]:
+        path = entry["targetPath"]
+        backup = entry["backupPath"]
+        if path.exists() or path.is_symlink():
+            errors.append(f"preserved unexpected uninstall target: {path}")
+            break
+        if backup.exists() or backup.is_symlink():
+            if hash_path(backup) != entry["sha256"]:
+                errors.append(f"preserved drifted uninstall backup: {backup}")
+                break
+            try:
+                remove_path(backup)
+            except Exception as error:
+                errors.append(f"cleanup failed for {backup}: {error}")
+                break
+    config = record["config"]
+    if not errors and config is not None and config["backupPath"].exists():
+        backup = config["backupPath"]
+        if hash_path(backup) != config["oldHash"]:
+            errors.append(f"preserved drifted uninstall backup: {backup}")
+        else:
+            try:
+                backup.unlink()
+            except OSError as error:
+                errors.append(f"cleanup failed for {backup}: {error}")
+    state_backup = record["stateBackupPath"]
+    if not errors and state_backup.exists():
+        if hash_path(state_backup) != record["stateHash"]:
+            errors.append(f"preserved drifted uninstall recovery state: {state_backup}")
+        else:
+            try:
+                state_backup.unlink()
+            except OSError as error:
+                errors.append(f"cleanup failed for {state_backup}: {error}")
+    if errors:
+        _write_recovery_journal(
+            journal_path,
+            {**record["_saved"], "status": "cleanup-incomplete", "rollbackErrors": errors},
+        )
+        raise RuntimeError("uninstall committed but cleanup failed: " + "; ".join(errors))
+    _write_recovery_journal(
+        journal_path, {**record["_saved"], "status": "completed", "rollbackErrors": []}
+    )
+
+
+def _recover_uninstall_operations(home: Path, pending: list[tuple[Path, dict]]) -> None:
+    state_path = home / ".codex/my-codex-harness/install-state.json"
+    for journal_path, saved in pending:
+        record = _recovery_record(home, journal_path, saved)
+        state_backup = record["stateBackupPath"]
+        active = state_path.exists()
+        recovery = state_backup.exists()
+        if not active and recovery and hash_path(state_backup) == record["stateHash"]:
+            _finish_uninstall_cleanup(home, journal_path, record)
+        elif (
+            record.get("status") in {"running", "rollback-incomplete"}
+            and active
+            and not recovery
+            and hash_path(state_path) == record["stateHash"]
+        ):
+            _rollback_uninstall(home, journal_path, record)
+        elif not active and not recovery and record.get("status") in {
+            "committed", "cleanup-incomplete"
+        } and all(
+            not entry["backupPath"].exists() and not entry["targetPath"].exists()
+            for entry in record["moves"]
+        ):
+            _write_recovery_journal(
+                journal_path,
+                {**record["_saved"], "status": "completed", "rollbackErrors": []},
+            )
+        else:
+            raise RuntimeError("uninstall recovery state is missing or drifted")
+
+
+def _orphaned_uninstall_recovery(home: Path) -> list[Path]:
+    root = home / ".codex/my-codex-harness"
+    if not root.exists():
+        return []
+    return sorted(root.glob(".install-state.rollback-*.json"))
+
+
+def _managed_uninstall_leftovers(home: Path) -> list[Path]:
+    leftovers = [
+        home / ".codex/plugins/my-codex-harness",
+        *(home / f".codex/agents/harness-{name}.toml" for name in ("builder", "reviewer", "librarian")),
+    ]
+    found = [path for path in leftovers if path.exists() or path.is_symlink()]
+    for root in (
+        home / ".codex/plugins",
+        home / ".codex/agents",
+        home / ".agents/skills",
+    ):
+        validate_target(home, root)
+        if not root.exists():
+            continue
+        for path in root.iterdir():
+            relative = _relative(home, path)
+            if RECOVERY_BACKUP.fullmatch(relative) or (
+                path.name.startswith(".")
+                and ".rollback-" in path.name
+                and RECOVERY_TARGET.fullmatch(relative)
+            ):
+                found.append(path)
+    return sorted(set(found))
 
 
 def build_plan(home: Path) -> dict | None:
@@ -149,8 +405,21 @@ def build_plan(home: Path) -> dict | None:
 
 
 def uninstall_package(home: Path, *, dry_run: bool = False) -> dict:
+    home = home.absolute()
+    validate_home(home)
+    pending = _pending_uninstall_journals(home)
+    if dry_run and pending:
+        return {"dryRun": True, "recoveryRequired": True}
+    if pending:
+        _recover_uninstall_operations(home, pending)
+    orphaned = _orphaned_uninstall_recovery(home)
+    if orphaned:
+        raise RuntimeError(f"orphaned uninstall recovery state: {orphaned[0]}")
     plan = build_plan(home)
     if plan is None:
+        leftovers = _managed_uninstall_leftovers(home)
+        if leftovers:
+            raise RuntimeError("managed uninstall leftovers exist without recovery state")
         return {"idempotent": True}
     if dry_run:
         return {"dryRun": True, "ownedPaths": len(plan["ownedPaths"])}
@@ -163,87 +432,60 @@ def uninstall_package(home: Path, *, dry_run: bool = False) -> dict:
 
     timestamp = _timestamp()
     journal = plan["home"] / f".codex/my-codex-harness/journals/uninstall-{timestamp}.json"
-    actions = []
-    moved: list[tuple[Path, Path]] = []
-    config_written = False
-    committed = False
-    durable_backup = None
     state_backup = plan["statePath"].parent / f".install-state.rollback-{timestamp}.json"
-    atomic_write_json(journal, {"status": "running", "actions": actions})
+    record = {
+        "status": "running",
+        "stateBackup": _relative(home, state_backup),
+        "stateHash": hash_path(plan["statePath"]),
+        "moves": [],
+        "config": None,
+        "rollbackErrors": [],
+    }
+    _write_recovery_journal(journal, record)
     try:
         for path in sorted(plan["ownedPaths"], key=lambda item: len(item.parts), reverse=True):
             relative = path.relative_to(plan["home"]).as_posix()
             if hash_path(path) != plan["removalHashes"][relative]:
                 raise ValueError(f"managed path drift after preflight: {relative}")
             backup = path.parent / f".{path.name}.uninstall-{timestamp}"
-            moved.append((path, backup))
-            actions.append({"action": "intent-remove", "path": str(path)})
-            atomic_write_json(journal, {"status": "running", "actions": actions})
+            record["moves"].append(
+                {
+                    "path": relative,
+                    "backup": _relative(home, backup),
+                    "sha256": plan["removalHashes"][relative],
+                }
+            )
+            _write_recovery_journal(journal, record)
             os.replace(path, backup)
         if plan["configRaw"] != plan["newConfigRaw"]:
             if plan["configPath"].read_bytes() != plan["configRaw"]:
                 raise ValueError("config.toml drifted after preflight")
             durable_backup = plan["statePath"].parent / "backups" / f"config.toml.uninstall-{timestamp}"
+            record["config"] = {
+                "path": ".codex/config.toml",
+                "backup": _relative(home, durable_backup),
+                "oldHash": _file_hash(plan["configRaw"]),
+                "newHash": _file_hash(plan["newConfigRaw"]),
+            }
+            _write_recovery_journal(journal, record)
             atomic_write_bytes(durable_backup, plan["configRaw"])
-            actions.append({"action": "backup", "path": str(durable_backup)})
-            atomic_write_json(journal, {"status": "running", "actions": actions})
-            config_written = True
-            actions.append({"action": "intent-config", "path": str(plan["configPath"])})
-            atomic_write_json(journal, {"status": "running", "actions": actions})
             atomic_write_bytes(plan["configPath"], plan["newConfigRaw"])
         if plan["statePath"].read_bytes() != plan["stateRaw"]:
             raise ValueError("install state drifted after preflight")
         os.replace(plan["statePath"], state_backup)
-        actions.append({"action": "remove", "path": str(plan["statePath"])})
-        atomic_write_json(journal, {"status": "completed", "actions": actions})
-        committed = True
-        for _, backup in moved:
-            remove_path(backup)
-        state_backup.unlink()
-        return {"removed": len(moved)}
+        record["status"] = "committed"
+        _write_recovery_journal(journal, record)
     except Exception as error:
-        if committed:
-            atomic_write_json(
-                journal,
-                {
-                    "status": "cleanup-incomplete",
-                    "actions": actions,
-                    "rollbackErrors": [f"post-commit cleanup failed: {error}"],
-                },
-            )
-            raise RuntimeError(f"uninstall committed but cleanup failed: {error}") from error
-        rollback_errors = []
-        if state_backup.exists() and not plan["statePath"].exists():
-            os.replace(state_backup, plan["statePath"])
-        elif state_backup.exists():
-            rollback_errors.append(f"preserved rollback state backup: {state_backup}")
-        if config_written:
-            current_config = plan["configPath"].read_bytes()
-            if current_config == plan["newConfigRaw"]:
-                atomic_write_bytes(plan["configPath"], plan["configRaw"])
-            elif current_config != plan["configRaw"]:
-                rollback_errors.append(f"preserved drifted config: {plan['configPath']}")
-        for path, backup in reversed(moved):
-            if not path.exists() and backup.exists():
-                os.replace(backup, path)
-            elif backup.exists():
-                rollback_errors.append(f"preserved rollback backup for drifted path: {path}")
-        if durable_backup is not None and durable_backup.exists():
-            if hash_path(durable_backup) == hash_path(plan["configPath"]):
-                durable_backup.unlink()
-            else:
-                rollback_errors.append(f"preserved drifted uninstall backup: {durable_backup}")
-        atomic_write_json(
-            journal,
-            {
-                "status": "rollback-incomplete" if rollback_errors else "rolled-back",
-                "actions": actions,
-                "rollbackErrors": rollback_errors,
-            },
-        )
-        if rollback_errors:
-            raise RuntimeError(f"{error}; " + "; ".join(rollback_errors)) from error
+        parsed = _recovery_record(home, journal, record)
+        if not plan["statePath"].exists() and state_backup.exists():
+            record["status"] = "committed"
+            _write_recovery_journal(journal, record)
+            raise RuntimeError(f"uninstall committed but final journal update failed: {error}") from error
+        _rollback_uninstall(home, journal, parsed)
         raise
+    parsed = _recovery_record(home, journal, record)
+    _finish_uninstall_cleanup(home, journal, parsed)
+    return {"removed": len(record["moves"])}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -262,6 +504,9 @@ def main(argv: list[str] | None = None) -> int:
     if result.get("idempotent"):
         print("My Codex Harness is not installed")
     elif args.dry_run:
+        if result.get("recoveryRequired"):
+            print("uninstall recovery required before changes can be previewed", file=sys.stderr)
+            return 1
         print(f"would remove {result['ownedPaths']} owned paths")
     else:
         print(f"uninstalled My Codex Harness ({result['removed']} owned paths)")

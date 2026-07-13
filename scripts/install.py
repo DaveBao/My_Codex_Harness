@@ -2,6 +2,7 @@
 """Install or upgrade My Codex Harness transactionally for one user."""
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -39,6 +40,25 @@ from package_model import merge_agents_table, parse_agents_table  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_NAMES = ("builder", "reviewer", "librarian")
 SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+HASH = re.compile(r"^[0-9a-f]{64}$")
+RECOVERY_PATHS = {
+    "path": re.compile(
+        r"(?:\.codex/plugins/my-codex-harness"
+        r"|\.codex/agents/harness-(?:builder|reviewer|librarian)\.toml"
+        r"|\.agents/skills/[A-Za-z0-9][A-Za-z0-9._-]*"
+        r"|\.codex/config\.toml"
+        r"|\.codex/my-codex-harness/install-state\.json"
+        r"|\.codex/my-codex-harness/backups/config\.toml\.backup-[0-9TZ]+)"
+    ),
+    "backup": re.compile(
+        r"(?:\.codex/plugins/\.my-codex-harness"
+        r"|\.agents/skills/\.[A-Za-z0-9][A-Za-z0-9._-]*)\.rollback-[0-9TZ]+"
+    ),
+    "stage": re.compile(
+        r"(?:\.codex/plugins/\.my-codex-harness"
+        r"|\.agents/skills/\.[A-Za-z0-9][A-Za-z0-9._-]*)\.stage-[A-Za-z0-9_-]+"
+    ),
+}
 
 
 def _timestamp() -> str:
@@ -333,6 +353,164 @@ def _write_journal(path: Path, status: str, actions: list[dict], errors: list[st
     )
 
 
+def _recovery_path(home: Path, relative: object, kind: str) -> Path:
+    if not isinstance(relative, str) or not RECOVERY_PATHS[kind].fullmatch(relative):
+        raise ValueError(f"invalid install recovery {kind}")
+    return canonical_owned_path(home, relative)
+
+
+def _journal_undo(home: Path, actions: object) -> list[dict]:
+    if not isinstance(actions, list):
+        raise ValueError("invalid install recovery actions")
+    undo = []
+    for saved in actions:
+        if not isinstance(saved, dict) or set(saved) != {
+            "action", "path", "oldHash", "newHash", "backup", "oldBytes", "stage"
+        }:
+            raise ValueError("invalid install recovery intent")
+        if saved["action"] not in {
+            "intent-replace", "intent-remove", "intent-backup", "intent-state"
+        }:
+            raise ValueError("invalid install recovery operation")
+        for key in ("oldHash", "newHash"):
+            if saved[key] is not None and (
+                not isinstance(saved[key], str) or not HASH.fullmatch(saved[key])
+            ):
+                raise ValueError("invalid install recovery hash")
+        old_bytes = saved["oldBytes"]
+        if old_bytes is not None:
+            if not isinstance(old_bytes, str):
+                raise ValueError("invalid install recovery bytes")
+            try:
+                old_bytes = base64.b64decode(old_bytes, validate=True)
+            except (ValueError, TypeError) as error:
+                raise ValueError("invalid install recovery bytes") from error
+        undo.append(
+            {
+                "path": _recovery_path(home, saved["path"], "path"),
+                "oldHash": saved["oldHash"],
+                "newHash": saved["newHash"],
+                "backup": (
+                    _recovery_path(home, saved["backup"], "backup")
+                    if saved["backup"] is not None
+                    else None
+                ),
+                "oldBytes": old_bytes,
+                "stage": (
+                    _recovery_path(home, saved["stage"], "stage")
+                    if saved["stage"] is not None
+                    else None
+                ),
+                "operation": saved["action"].removeprefix("intent-"),
+            }
+        )
+    return undo
+
+
+def _pending_install_journals(home: Path) -> list[tuple[Path, dict]]:
+    journals = _paths(home)["journals"]
+    validate_target(home, journals)
+    if not journals.exists():
+        return []
+    pending = []
+    for path in sorted(journals.iterdir()):
+        if not re.fullmatch(r"install-[0-9TZ]+\.json", path.name):
+            continue
+        value = load_json_object(path)
+        if value.get("status") in {
+            "running", "committed", "cleanup-incomplete", "rollback-incomplete"
+        }:
+            pending.append((path, value))
+    return pending
+
+
+def _validated_committed_recovery_state(
+    home: Path,
+    journal_path: Path,
+    state_path: Path,
+    undo: list[dict],
+) -> dict:
+    state_intents = [action for action in undo if action["operation"] == "state"]
+    if len(state_intents) != 1 or state_intents[0]["path"] != state_path:
+        raise ValueError("install recovery journal has invalid state intent")
+    state = load_json_object(state_path)
+    if state.get("lastJournal") != home_relative(home, journal_path):
+        raise RuntimeError("install recovery state does not match its journal")
+    cleanup = state.get("cleanupBackups")
+    if not isinstance(cleanup, list):
+        raise ValueError("invalid cleanup backup state")
+    allowed_cleanup = {
+        (home_relative(home, action["backup"]), action["oldHash"])
+        for action in undo
+        if action.get("backup") is not None and action.get("oldHash") is not None
+    }
+    existing_cleanup = []
+    for entry in cleanup:
+        path = _cleanup_backup_path(home, entry)
+        if (entry["path"], entry["sha256"]) not in allowed_cleanup:
+            raise ValueError("cleanup backup is not authorized by install journal")
+        if path.exists() or path.is_symlink():
+            if hash_path(path) != entry["sha256"]:
+                raise ValueError("cleanup backup state drift")
+            existing_cleanup.append(entry)
+    if not isinstance(state.get("cleanupIncomplete"), bool) or not (
+        isinstance(state.get("installWarnings"), list)
+        and all(isinstance(item, str) for item in state["installWarnings"])
+    ):
+        raise ValueError("invalid committed cleanup state")
+    paths = _paths(home)
+    _, config_text = _read_config(paths["config"])
+    _validate_owned_state(
+        home,
+        paths,
+        {**state, "cleanupBackups": existing_cleanup},
+        parse_agents_table(config_text),
+        _skill_names(paths["package"]),
+    )
+    return state
+
+
+def _recover_install_operations(home: Path, pending: list[tuple[Path, dict]]) -> None:
+    state_path = _paths(home)["state"]
+    for journal_path, journal in pending:
+        actions = journal.get("actions")
+        undo = _journal_undo(home, actions)
+        state_intents = [action for action in undo if action["operation"] == "state"]
+        state_intent = state_intents[0] if len(state_intents) == 1 else None
+        state_claims_current_journal = False
+        if state_path.exists():
+            candidate = load_json_object(state_path)
+            state_claims_current_journal = (
+                candidate.get("lastJournal") == home_relative(home, journal_path)
+            )
+        if state_intent is not None and state_path.exists() and (
+            hash_path(state_path) == state_intent["newHash"] or state_claims_current_journal
+        ):
+            state = _validated_committed_recovery_state(
+                home, journal_path, state_path, undo
+            )
+            _finish_committed_install(
+                state,
+                state_path,
+                journal_path,
+                actions,
+                home,
+                state.get("cleanupBackups", []),
+            )
+            continue
+        if journal.get("status") in {"committed", "cleanup-incomplete"}:
+            raise RuntimeError("committed install recovery state is missing or drifted")
+        errors = _rollback(undo)
+        _write_journal(
+            journal_path,
+            "rollback-incomplete" if errors else "rolled-back",
+            actions,
+            errors,
+        )
+        if errors:
+            raise RuntimeError("install recovery incomplete: " + "; ".join(errors))
+
+
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
 
@@ -348,7 +526,22 @@ def _backup_path(path: Path, timestamp: str) -> Path:
     return path.parent / f".{path.name}.rollback-{timestamp}"
 
 
+def _cleanup_backup_path(home: Path, entry: object) -> Path:
+    if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+        raise ValueError("invalid cleanup backup entry")
+    relative = entry["path"]
+    allowed = isinstance(relative, str) and re.fullmatch(
+        r"(?:\.codex/plugins/\.my-codex-harness|\.agents/skills/\.[A-Za-z0-9][A-Za-z0-9._-]*)"
+        r"\.rollback-[0-9TZ]+",
+        relative,
+    )
+    if not allowed or not isinstance(entry["sha256"], str) or not HASH.fullmatch(entry["sha256"]):
+        raise ValueError("invalid cleanup backup entry")
+    return canonical_owned_path(home, relative)
+
+
 def _register_intent(
+    home: Path,
     path: Path,
     new_hash: str | None,
     undo: list[dict],
@@ -370,7 +563,17 @@ def _register_intent(
         "operation": operation,
     }
     undo.append(intent)
-    actions.append({"action": f"intent-{operation}", "path": str(path)})
+    actions.append(
+        {
+            "action": f"intent-{operation}",
+            "path": home_relative(home, path),
+            "oldHash": intent["oldHash"],
+            "newHash": new_hash,
+            "backup": home_relative(home, backup) if backup is not None else None,
+            "oldBytes": base64.b64encode(old_bytes).decode() if old_bytes is not None else None,
+            "stage": home_relative(home, stage) if stage is not None else None,
+        }
+    )
     return intent
 
 
@@ -420,14 +623,22 @@ def _finish_committed_install(
     cleanup_entries: list[dict],
     initial_error: Exception | None = None,
 ) -> dict:
+    if not isinstance(cleanup_entries, list):
+        raise ValueError("invalid cleanup backup state")
+    cleanup_paths = {
+        entry["path"]: _cleanup_backup_path(home, entry) for entry in cleanup_entries
+    }
     remaining = list(cleanup_entries)
     errors = [str(initial_error)] if initial_error is not None else []
     if not errors:
         for entry in list(cleanup_entries):
-            path = canonical_owned_path(home, entry["path"])
+            path = cleanup_paths[entry["path"]]
             try:
                 if not path.exists() and not path.is_symlink():
-                    raise OSError(f"cleanup backup disappeared: {path}")
+                    remaining.remove(entry)
+                    state = {**state, "cleanupBackups": list(remaining)}
+                    atomic_write_json(state_path, state)
+                    continue
                 if hash_path(path) != entry["sha256"]:
                     raise OSError(f"cleanup backup drifted: {path}")
                 remove_path(path)
@@ -441,7 +652,7 @@ def _finish_committed_install(
         remaining = [
             entry
             for entry in remaining
-            if (home / entry["path"]).exists() or (home / entry["path"]).is_symlink()
+            if cleanup_paths[entry["path"]].exists() or cleanup_paths[entry["path"]].is_symlink()
         ]
         state = {
             **state,
@@ -465,6 +676,18 @@ def _finish_committed_install(
         "cleanupIncomplete": False,
         "installWarnings": [],
     }
+    try:
+        atomic_write_json(state_path, state)
+    except Exception as error:
+        return _finish_committed_install(
+            state,
+            state_path,
+            journal_path,
+            actions,
+            home,
+            [],
+            error,
+        )
     try:
         _write_journal(journal_path, "completed", actions)
     except Exception as error:
@@ -490,6 +713,13 @@ def install_package(
     symlink_factory: Callable[..., object] = os.symlink,
     mutation_hook: Callable[[str, Path], None] | None = None,
 ) -> dict:
+    home = home.absolute()
+    validate_home(home)
+    pending = _pending_install_journals(home)
+    if dry_run and pending:
+        return {"dryRun": True, "recoveryRequired": True, "idempotent": False}
+    if pending:
+        _recover_install_operations(home, pending)
     plan = build_plan(package_root, home, force_copy=force_copy)
     if dry_run:
         return {"dryRun": True, "idempotent": plan["idempotent"]}
@@ -523,6 +753,7 @@ def install_package(
             else None
         )
         package_intent = _register_intent(
+            home,
             paths["package"],
             hash_path(package_stage),
             undo,
@@ -548,6 +779,7 @@ def install_package(
             old = destination.read_bytes() if destination.exists() else None
             content = source.read_bytes()
             _register_intent(
+                home,
                 destination,
                 _file_hash(content),
                 undo,
@@ -569,6 +801,7 @@ def install_package(
             _assert_target_unchanged(plan, destination)
             backup = _backup_path(destination, timestamp)
             intent = _register_intent(
+                home,
                 destination,
                 None,
                 undo,
@@ -596,6 +829,7 @@ def install_package(
                 else None
             )
             intent = _register_intent(
+                home,
                 destination,
                 hash_path(stage),
                 undo,
@@ -620,6 +854,7 @@ def install_package(
             if plan["oldConfigRaw"] is not None:
                 config_backup = paths["backups"] / f"config.toml.backup-{timestamp}"
                 _register_intent(
+                    home,
                     config_backup,
                     _file_hash(plan["oldConfigRaw"]),
                     undo,
@@ -635,6 +870,7 @@ def install_package(
                     }
                 )
             _register_intent(
+                home,
                 paths["config"],
                 _file_hash(plan["mergedConfigRaw"]),
                 undo,
@@ -682,6 +918,7 @@ def install_package(
             raise ValueError("install state drifted after preflight")
         state_bytes = _json_bytes(state)
         state_intent = _register_intent(
+            home,
             paths["state"],
             _file_hash(state_bytes),
             undo,
@@ -751,6 +988,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"install failed: {error}", file=sys.stderr)
         return 1
     if args.dry_run:
+        if result.get("recoveryRequired"):
+            print("install recovery required before changes can be previewed", file=sys.stderr)
+            return 1
         print("already installed; no changes" if result["idempotent"] else "would install My Codex Harness")
     elif result.get("idempotent"):
         print("My Codex Harness already installed; no changes")
