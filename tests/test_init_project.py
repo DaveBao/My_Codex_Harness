@@ -145,6 +145,34 @@ class InitProjectTests(unittest.TestCase):
                 self.assertIn("top level", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_git_symlink_and_invalid_git_directory_fail_closed(self):
+        for git_kind in ("external_symlink", "invalid_directory"):
+            for dry_run in (False, True):
+                with (
+                    self.subTest(git_kind=git_kind, dry_run=dry_run),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    base = Path(directory)
+                    target = base / "target"
+                    target.mkdir()
+                    if git_kind == "external_symlink":
+                        external = base / "external"
+                        external.mkdir()
+                        subprocess.run(["git", "init", "-q"], cwd=external, check=True)
+                        (target / ".git").symlink_to(external / ".git", target_is_directory=True)
+                    else:
+                        (target / ".git").mkdir()
+                        (target / ".git/user-marker").write_text("preserve\n")
+                    before = tree_snapshot(base)
+
+                    args = ("--dry-run",) if dry_run else ()
+                    result = run_init(target, *args)
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual(before, tree_snapshot(base))
+                    self.assertIn(".git", result.stderr + result.stdout)
+                    self.assertNotIn("Traceback", result.stderr)
+
     def test_non_utf8_gitignore_fails_before_any_write_without_path_leakage(self):
         for dry_run in (False, True):
             with self.subTest(dry_run=dry_run), tempfile.TemporaryDirectory() as directory:
@@ -305,6 +333,139 @@ class InitProjectTests(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertTrue((target / "AGENTS.md").is_file())
+
+    def test_bare_repository_is_rejected_without_writes(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "bare.git"
+                subprocess.run(["git", "init", "-q", "--bare", str(target)], check=True)
+                before = tree_snapshot(target)
+
+                args = ("--dry-run",) if dry_run else ()
+                result = run_init(target, *args)
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(before, tree_snapshot(target))
+                self.assertIn("bare", result.stderr.lower())
+
+    def test_non_repository_detection_does_not_depend_on_english_stderr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            initializer = load_initializer()
+            localized = subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout="", stderr="fatal: kein Repository\n"
+            )
+
+            with mock.patch.object(initializer.subprocess, "run", return_value=localized):
+                self.assertIsNone(initializer.probe_git_root(target))
+
+    def test_post_plan_destination_drift_fails_without_overwrite_or_escape(self):
+        for drift_kind in ("create_file", "managed_replace", "parent_symlink"):
+            with self.subTest(drift_kind=drift_kind), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                target = base / "target"
+                target.mkdir()
+                initializer = load_initializer()
+
+                if drift_kind == "managed_replace":
+                    initialized = run_init(target)
+                    self.assertEqual(0, initialized.returncode, initialized.stderr)
+                    managed = target / "docs/references/builder-handoff.schema.json"
+                    managed.write_text('{"planned":true}\n')
+                    plan, _report = initializer.build_plan(target, force=True)
+                    managed.write_text('{"drifted":true}\n')
+                else:
+                    plan, _report = initializer.build_plan(target, force=False)
+                    if drift_kind == "create_file":
+                        (target / "AGENTS.md").write_text("user file after plan\n")
+                    else:
+                        outside = base / "outside"
+                        outside.mkdir()
+                        (target / ".codex").symlink_to(outside, target_is_directory=True)
+                before = tree_snapshot(base)
+
+                with self.assertRaises(initializer.InitError):
+                    initializer.execute_plan(target, plan)
+
+                self.assertEqual(before, tree_snapshot(base))
+
+    def test_post_plan_git_appearance_is_preserved_and_blocks_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            initializer = load_initializer()
+            plan, _report = initializer.build_plan(target, force=False)
+            (target / ".git").mkdir()
+            marker = target / ".git/user-marker"
+            marker.write_text("preserve\n")
+            before = tree_snapshot(target)
+
+            with self.assertRaises(initializer.InitError):
+                initializer.execute_plan(target, plan)
+
+            self.assertEqual(before, tree_snapshot(target))
+
+    def test_post_plan_parent_repo_creation_rolls_back_scaffold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            target = parent / "child"
+            target.mkdir()
+            initializer = load_initializer()
+            plan, _report = initializer.build_plan(target, force=False)
+            subprocess.run(["git", "init", "-q"], cwd=parent, check=True)
+            before = tree_snapshot(parent)
+
+            with self.assertRaises(initializer.InitError) as caught:
+                initializer.execute_plan(target, plan)
+
+            self.assertEqual(before, tree_snapshot(parent))
+            self.assertIn("existing Git repository", str(caught.exception))
+            self.assertIn("rolled back", str(caught.exception))
+
+    def test_git_rollback_removes_only_undrifted_git_created_by_this_run(self):
+        for drifted in (False, True):
+            with self.subTest(drifted=drifted), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)
+                initializer = load_initializer()
+                source = SCAFFOLD / "AGENTS.md"
+                plan = [
+                    ("git-init", target),
+                    ("copy-create", source, target / "AGENTS.md"),
+                ]
+
+                def fail_after_git(_source, _destination):
+                    if drifted:
+                        (target / ".git/user-marker").write_text("external drift\n")
+                    raise OSError("injected failure after git init")
+
+                with mock.patch.object(initializer, "atomic_copy", side_effect=fail_after_git):
+                    with self.assertRaises(initializer.InitError) as caught:
+                        initializer.execute_plan(target, plan)
+
+                if drifted:
+                    self.assertTrue((target / ".git/user-marker").is_file())
+                    self.assertIn("rollback was incomplete", str(caught.exception))
+                else:
+                    self.assertFalse((target / ".git").exists())
+                    self.assertIn("rolled back", str(caught.exception))
+
+    def test_partial_git_init_failure_is_preserved_and_reported_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            initializer = load_initializer()
+
+            def git_behavior(command, **_kwargs):
+                if "rev-parse" in command:
+                    return subprocess.CompletedProcess(command, 128, "", "localized failure\n")
+                (target / ".git").mkdir()
+                (target / ".git/user-marker").write_text("partial unknown state\n")
+                raise subprocess.CalledProcessError(1, command)
+
+            with mock.patch.object(initializer.subprocess, "run", side_effect=git_behavior):
+                with self.assertRaises(initializer.InitError) as caught:
+                    initializer.execute_plan(target, [("git-init", target)])
+
+            self.assertTrue((target / ".git/user-marker").is_file())
+            self.assertIn("rollback was incomplete", str(caught.exception))
 
     def test_gitignore_preserves_existing_crlf_bytes_when_appending(self):
         with tempfile.TemporaryDirectory() as directory:

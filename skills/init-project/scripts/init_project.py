@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import stat
@@ -80,9 +81,15 @@ def destination_issue(root: Path, destination: Path, expect_directory: bool) -> 
 
 
 def probe_git_root(root: Path) -> Path | None:
+    git_path = root / ".git"
+    git_mode = path_mode(git_path)
+    if git_mode is not None and stat.S_ISLNK(git_mode):
+        raise InitError("target .git must not be a symlink")
+    if git_mode is not None and not (stat.S_ISDIR(git_mode) or stat.S_ISREG(git_mode)):
+        raise InitError("target .git is not a regular file or directory")
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-prefix"],
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
             text=True,
         )
@@ -92,14 +99,30 @@ def probe_git_root(root: Path) -> Path | None:
         raise InitError("Git repository probe failed; verify Git is available") from error
 
     if result.returncode == 0:
-        if result.stdout not in ("", "\n"):
+        inside = result.stdout.removesuffix("\n")
+        if inside == "false":
+            raise InitError("bare Git repositories are not valid project roots")
+        if inside != "true":
+            raise InitError("Git repository probe returned an invalid work-tree result")
+        prefix = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-prefix"],
+            capture_output=True,
+            text=True,
+        )
+        if prefix.returncode != 0:
+            raise InitError("Git repository prefix probe failed")
+        if prefix.stdout not in ("", "\n"):
             raise InitError(
                 "target is inside an existing Git repository; rerun with --root at that "
                 "repository's top level"
             )
+        if git_mode is None:
+            raise InitError("Git work-tree root has no local .git metadata")
         return root
-    if "not a git repository" in result.stderr.lower():
+    if result.returncode == 128 and git_mode is None:
         return None
+    if git_mode is not None:
+        raise InitError("target contains existing invalid .git metadata")
     raise InitError(
         f"Git repository probe failed with exit {result.returncode}; "
         "verify repository state and permissions"
@@ -149,7 +172,6 @@ def build_plan(root: Path, force: bool) -> tuple[list[tuple], dict[str, list[str
 
     if git_root is None:
         report["created"].append(".git/")
-        plan.append(("git-init", root))
     else:
         report["skipped"].append(".git/ (unchanged)")
 
@@ -218,6 +240,9 @@ def build_plan(root: Path, force: bool) -> tuple[list[tuple], dict[str, list[str
         else:
             report["skipped"].append(".gitignore entries (unchanged)")
 
+    if git_root is None:
+        plan.append(("git-init", root))
+
     return plan, report
 
 
@@ -261,12 +286,89 @@ def remove_created(path: Path) -> None:
         path.unlink()
 
 
+def git_tree_fingerprint(git_path: Path) -> tuple:
+    root_stat = git_path.lstat()
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+        raise OSError("created .git is not a directory")
+    entries: list[tuple] = [
+        (".", "dir", root_stat.st_dev, root_stat.st_ino, stat.S_IMODE(root_stat.st_mode))
+    ]
+
+    def visit(directory: Path) -> None:
+        for child in sorted(directory.iterdir(), key=lambda path: path.name):
+            child_stat = child.lstat()
+            relative = child.relative_to(git_path).as_posix()
+            mode = stat.S_IMODE(child_stat.st_mode)
+            if stat.S_ISDIR(child_stat.st_mode):
+                entries.append((relative, "dir", mode))
+                visit(child)
+            elif stat.S_ISREG(child_stat.st_mode):
+                digest = hashlib.sha256(child.read_bytes()).hexdigest()
+                entries.append((relative, "file", mode, child_stat.st_size, digest))
+            elif stat.S_ISLNK(child_stat.st_mode):
+                entries.append((relative, "symlink", os.readlink(child)))
+            else:
+                entries.append((relative, "special", child_stat.st_mode, child_stat.st_size))
+
+    visit(git_path)
+    return tuple(entries)
+
+
+def validate_action(root: Path, entry: tuple) -> None:
+    action, *details = entry
+    if action == "git-init":
+        if path_mode(root / ".git") is not None:
+            raise OSError("target .git appeared after planning")
+        if probe_git_root(root) is not None:
+            raise OSError("target became a Git repository after planning")
+        if path_mode(root / ".git") is not None:
+            raise OSError("target .git appeared during validation")
+        return
+    if action == "mkdir":
+        destination = details[0]
+        issue = destination_issue(root, destination, True)
+        if issue or path_mode(destination) is not None:
+            raise OSError("directory destination changed after planning")
+        return
+    if action in ("copy-create", "write-create"):
+        destination = details[1] if action == "copy-create" else details[0]
+        issue = destination_issue(root, destination, False)
+        if issue or path_mode(destination) is not None:
+            raise OSError("file destination changed after planning")
+        return
+    if action in ("copy-replace", "write-replace"):
+        if action == "copy-replace":
+            destination, old_content, old_mode = details[1], details[2], details[3]
+        else:
+            destination, old_content, old_mode = details[0], details[2], details[3]
+        issue = destination_issue(root, destination, False)
+        if issue:
+            raise OSError("replacement destination changed after planning")
+        current_mode = path_mode(destination)
+        if current_mode is None or not stat.S_ISREG(current_mode):
+            raise OSError("replacement destination is no longer a regular file")
+        if destination.read_bytes() != old_content or stat.S_IMODE(current_mode) != old_mode:
+            raise OSError("replacement destination content or mode changed after planning")
+        return
+    raise OSError("unknown initialization action")
+
+
 def rollback(journal: list[tuple]) -> bool:
     complete = True
     for entry in reversed(journal):
         action, path, *details = entry
         try:
             if action == "remove":
+                remove_created(path)
+            elif action == "git-intent":
+                if path_mode(path) is not None:
+                    complete = False
+            elif action == "remove-git":
+                if path_mode(path) is None:
+                    continue
+                if git_tree_fingerprint(path) != details[0]:
+                    complete = False
+                    continue
                 remove_created(path)
             elif action == "remove-file":
                 mode = path_mode(path)
@@ -301,15 +403,15 @@ def execute_plan(root: Path, plan: list[tuple]) -> None:
     try:
         for entry in plan:
             action, *details = entry
+            validate_action(root, entry)
             if action == "git-init":
                 git_path = root / ".git"
+                journal.append(("git-intent", git_path))
                 try:
                     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
                 except (OSError, subprocess.CalledProcessError):
-                    if path_mode(git_path) is not None:
-                        remove_created(git_path)
                     raise
-                journal.append(("remove", git_path))
+                journal[-1] = ("remove-git", git_path, git_tree_fingerprint(git_path))
             elif action == "mkdir":
                 path = details[0]
                 path.mkdir()
@@ -336,10 +438,11 @@ def execute_plan(root: Path, plan: list[tuple]) -> None:
                 atomic_write(destination, content, old_mode)
             else:
                 raise OSError("unknown initialization action")
-    except (OSError, UnicodeError, subprocess.CalledProcessError) as error:
+    except (InitError, OSError, UnicodeError, subprocess.CalledProcessError) as error:
         restored = rollback(journal)
         state = "all initializer changes were rolled back" if restored else "rollback was incomplete"
-        raise InitError(f"write failed; {state}") from error
+        reason = str(error) if isinstance(error, InitError) else "write failed"
+        raise InitError(f"{reason}; {state}") from error
 
 
 def print_report(report: dict[str, list[str]]) -> None:
