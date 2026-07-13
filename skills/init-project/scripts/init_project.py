@@ -24,6 +24,10 @@ MANAGED_FILES = {
 REPORT_KEYS = ("created", "replaced", "skipped", "conflicts")
 
 
+class InitError(Exception):
+    """Expected initialization failure safe to show without a traceback."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Initialize a non-destructive project harness scaffold."
@@ -110,12 +114,59 @@ def copy_scaffold(root: Path, dry_run: bool, force: bool) -> dict[str, list[str]
     return report
 
 
-def ensure_git(root: Path, dry_run: bool) -> dict[str, list[str]]:
+def probe_git_root(root: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise InitError("Git executable was not found; install Git and retry") from error
+    except (OSError, UnicodeError) as error:
+        raise InitError("Git repository probe failed; verify Git is available") from error
+
+    if result.returncode == 0:
+        top_level = result.stdout.strip()
+        if not top_level:
+            raise InitError("Git repository probe returned no top level")
+        try:
+            resolved_top_level = Path(top_level).resolve()
+        except (OSError, RuntimeError) as error:
+            raise InitError("Git repository top level could not be resolved") from error
+        if resolved_top_level != root:
+            raise InitError(
+                "target is inside an existing Git repository; rerun with --root at that "
+                "repository's top level"
+            )
+        return resolved_top_level
+
+    if "not a git repository" in result.stderr.lower():
+        return None
+    raise InitError(
+        f"Git repository probe failed with exit {result.returncode}; "
+        "verify repository state and permissions"
+    )
+
+
+def preflight_gitignore(root: Path) -> str | None:
+    path = root / ".gitignore"
+    issue = destination_issue(root, path, False)
+    if issue:
+        raise InitError(f".gitignore cannot be updated: {issue}")
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeError as error:
+        raise InitError(".gitignore is not valid UTF-8; convert it to UTF-8 and retry") from error
+    except OSError as error:
+        raise InitError(".gitignore could not be read; verify its permissions") from error
+
+
+def ensure_git(root: Path, dry_run: bool, git_root: Path | None) -> dict[str, list[str]]:
     report = empty_report()
-    git_path = root / ".git"
-    if git_path.is_symlink():
-        report["conflicts"].append(".git (symlink destination)")
-    elif git_path.exists():
+    if git_root is not None:
         report["skipped"].append(".git/ (unchanged)")
     else:
         report["created"].append(".git/")
@@ -124,29 +175,24 @@ def ensure_git(root: Path, dry_run: bool) -> dict[str, list[str]]:
     return report
 
 
-def ensure_gitignore(root: Path, dry_run: bool) -> dict[str, list[str]]:
+def ensure_gitignore(root: Path, dry_run: bool, existing: str | None) -> dict[str, list[str]]:
     report = empty_report()
     path = root / ".gitignore"
-    issue = destination_issue(root, path, False)
-    if issue:
-        report["conflicts"].append(f".gitignore ({issue})")
-        return report
-
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    additions = [entry for entry in (".worktrees/", ".DS_Store") if entry not in existing.splitlines()]
-    if not path.exists():
+    content = existing or ""
+    additions = [entry for entry in (".worktrees/", ".DS_Store") if entry not in content.splitlines()]
+    if existing is None:
         report["created"].append(".gitignore")
     elif additions:
         report["created"].append(".gitignore entries: " + ", ".join(additions))
     else:
         report["skipped"].append(".gitignore entries (unchanged)")
 
-    if not dry_run and (additions or not path.exists()):
-        separator = "" if not existing or existing.endswith("\n") else "\n"
+    if not dry_run and (additions or existing is None):
+        separator = "" if not content or content.endswith("\n") else "\n"
         suffix = "\n".join(additions)
         if suffix:
             suffix += "\n"
-        path.write_text(existing + separator + suffix, encoding="utf-8")
+        path.write_text(content + separator + suffix, encoding="utf-8")
     return report
 
 
@@ -182,12 +228,17 @@ def main() -> int:
         return 2
 
     try:
+        git_root = probe_git_root(root)
+        gitignore = preflight_gitignore(root)
         report = merge_reports(
-            ensure_git(root, args.dry_run),
+            ensure_git(root, args.dry_run, git_root),
             copy_scaffold(root, args.dry_run, args.force),
-            ensure_gitignore(root, args.dry_run),
+            ensure_gitignore(root, args.dry_run, gitignore),
         )
-    except (OSError, subprocess.CalledProcessError) as error:
+    except InitError as error:
+        print(f"init-project failed: {error}", file=sys.stderr)
+        return 2
+    except (OSError, UnicodeError, subprocess.CalledProcessError) as error:
         print(f"init-project failed: {error}", file=sys.stderr)
         return 2
 

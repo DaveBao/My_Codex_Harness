@@ -99,6 +99,44 @@ class InitProjectTests(unittest.TestCase):
             self.assertEqual("keep\n", marker.read_text())
             self.assertIn(".git/ (unchanged)", result.stdout)
 
+    def test_nested_target_in_parent_git_repo_fails_before_writing(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run), tempfile.TemporaryDirectory() as directory:
+                parent = Path(directory)
+                subprocess.run(["git", "init", "-q"], cwd=parent, check=True)
+                target = parent / "child"
+                target.mkdir()
+                before = tree_snapshot(parent)
+
+                args = ("--dry-run",) if dry_run else ()
+                result = run_init(target, *args)
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(before, tree_snapshot(parent))
+                self.assertFalse((target / ".git").exists())
+                self.assertFalse((target / "AGENTS.md").exists())
+                self.assertIn("existing Git repository", result.stderr)
+                self.assertIn("top level", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_non_utf8_gitignore_fails_before_any_write_without_path_leakage(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory)
+                (target / ".gitignore").write_bytes(b"\xff\xfe")
+                before = tree_snapshot(target)
+
+                args = ("--dry-run",) if dry_run else ()
+                result = run_init(target, *args)
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(before, tree_snapshot(target))
+                self.assertIn(".gitignore", result.stderr)
+                self.assertIn("UTF-8", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn(str(target), result.stderr)
+                self.assertEqual("", result.stdout)
+
     def test_project_owned_files_are_preserved_even_with_force(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
