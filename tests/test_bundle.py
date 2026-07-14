@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts/build_bundle.py"
 DOCTOR = ROOT / "scripts/doctor.py"
 INSTALL = ROOT / "scripts/install.py"
+BOOTSTRAP = ROOT / "scripts/bootstrap.sh"
 DESIRED_AGENTS = {
     "max_depth": 1,
     "max_threads": 6,
@@ -50,6 +52,46 @@ def run_doctor(home: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def legacy_python() -> str | None:
+    candidates = [shutil.which("python3"), "/usr/bin/python3"]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
+        result = subprocess.run(
+            [
+                candidate,
+                "-c",
+                "import sys; raise SystemExit(0 if sys.version_info < (3, 11) else 1)",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
+def make_bootstrap_fixture(root: Path) -> Path:
+    script = root / "bootstrap.sh"
+    script.write_bytes(BOOTSTRAP.read_bytes())
+    script.chmod(0o755)
+    (root / "doctor.py").write_text("")
+    (root / "install.py").write_text("")
+    return script
+
+
+def write_fake_python(path: Path, *, compatible: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "${1-}" = "-c" ]; then\n'
+        f"  exit {0 if compatible else 1}\n"
+        "fi\n"
+        'printf "%s|%s\\n" "$0" "$*" >> "$BOOTSTRAP_LOG"\n'
+    )
+    path.chmod(0o755)
 
 
 def bundle_manifest(files: dict[str, str]) -> dict:
@@ -121,7 +163,7 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(DESIRED_AGENTS, manifest["desiredAgents"])
             self.assertTrue(manifest["files"])
 
-    def test_doctor_validates_complex_toml_with_stdlib_and_lexical_fallback(self):
+    def test_doctor_validates_complex_toml_with_stdlib_tomllib(self):
         doctor = load_doctor()
         config = '''
 # common Codex configuration forms
@@ -150,30 +192,75 @@ environment = { KEY = "value#kept", nested = { enabled = true } }
 name = 'one'
 '''
         doctor._validate_toml_parseability(config)
-        original = doctor.tomllib
-        doctor.tomllib = None
-        try:
-            doctor._validate_toml_parseability(config)
-        finally:
-            doctor.tomllib = original
 
-    def test_doctor_rejects_lexically_unparseable_toml_with_fallback(self):
+    def test_doctor_rejects_semantically_invalid_toml(self):
         doctor = load_doctor()
         invalid = (
+            "x = 1\nx = 2\n",
+            "x = [1 2]\n",
+            "x =\n",
+            "x = TRUE\n",
             "[broken\nvalue = [\n",
             'value = "unterminated\n',
-            'value = "bad' + "\\" + '\ncontinuation"\n',
-            "value = [1, 2\n",
-            "value = { nested = true\n",
         )
-        original = doctor.tomllib
-        doctor.tomllib = None
-        try:
-            for config in invalid:
-                with self.subTest(config=config), self.assertRaises(ValueError):
-                    doctor._validate_toml_parseability(config)
-        finally:
-            doctor.tomllib = original
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                doctor._validate_toml_parseability(config)
+
+    def test_doctor_requires_python_3_11_without_traceback(self):
+        python = legacy_python()
+        if python is None:
+            self.skipTest("Python older than 3.11 is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [python, str(DOCTOR)],
+                cwd=ROOT,
+                env={**os.environ, "HOME": directory, "USERPROFILE": directory},
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertEqual(1, len(result.stderr.splitlines()), result.stderr)
+        self.assertIn("python 3.11", result.stderr.lower())
+        self.assertNotIn("traceback", result.stderr.lower())
+
+    def test_doctor_rejects_system_python_older_than_3_11_without_traceback(self):
+        python = Path("/usr/bin/python3")
+        if not python.is_file():
+            self.skipTest("system Python is unavailable")
+        capability = subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import sys; raise SystemExit(0 if sys.version_info < (3, 11) else 1)",
+            ]
+        )
+        if capability.returncode != 0:
+            self.skipTest("system Python is already 3.11 or newer")
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [str(python), str(DOCTOR)],
+                cwd=ROOT,
+                env={**os.environ, "HOME": directory, "USERPROFILE": directory},
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertEqual(1, len(result.stderr.splitlines()), result.stderr)
+        self.assertIn("python 3.11", result.stderr.lower())
+        self.assertNotIn("traceback", result.stderr.lower())
+
+    def test_doctor_help_documents_python_3_11_requirement(self):
+        result = subprocess.run(
+            [sys.executable, str(DOCTOR), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("python 3.11", " ".join(result.stdout.lower().split()))
 
     def test_doctor_cli_rejects_invalid_config_toml(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -731,6 +818,117 @@ name = 'one'
         install = script.index('install.py" --yes')
         self.assertLess(doctor, preview)
         self.assertLess(preview, install)
+
+    def test_bootstrap_uses_one_qualified_override_with_space_safe_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "package with spaces"
+            base.mkdir()
+            script = make_bootstrap_fixture(base)
+            python = Path(directory) / "runtime with spaces/python3"
+            write_fake_python(python, compatible=True)
+            log = Path(directory) / "bootstrap.log"
+            result = subprocess.run(
+                ["sh", str(script)],
+                env={
+                    **os.environ,
+                    "HOME": str(Path(directory) / "home"),
+                    "HARNESS_PYTHON": str(python),
+                    "BOOTSTRAP_LOG": str(log),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                [
+                    f"{python}|{base / 'doctor.py'}",
+                    f"{python}|{base / 'install.py'} --dry-run",
+                    f"{python}|{base / 'install.py'} --yes",
+                ],
+                log.read_text().splitlines(),
+            )
+
+    def test_bootstrap_skips_incompatible_candidate_and_reuses_python_3_12(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "package"
+            base.mkdir()
+            script = make_bootstrap_fixture(base)
+            binaries = Path(directory) / "bin"
+            write_fake_python(binaries / "python3.13", compatible=False)
+            selected = binaries / "python3.12"
+            write_fake_python(selected, compatible=True)
+            write_fake_python(binaries / "python3.11", compatible=True)
+            write_fake_python(binaries / "python3", compatible=True)
+            log = Path(directory) / "bootstrap.log"
+            result = subprocess.run(
+                ["sh", str(script)],
+                env={
+                    **os.environ,
+                    "PATH": f"{binaries}:/usr/bin:/bin",
+                    "HOME": str(Path(directory) / "home"),
+                    "BOOTSTRAP_LOG": str(log),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(all(line.startswith(f"{selected}|") for line in log.read_text().splitlines()))
+
+    def test_bootstrap_finds_space_safe_codex_runtime_and_reports_no_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "package"
+            base.mkdir()
+            script = make_bootstrap_fixture(base)
+            binaries = Path(directory) / "bin"
+            for name in ("python3.13", "python3.12", "python3.11", "python3"):
+                write_fake_python(binaries / name, compatible=False)
+            home = Path(directory) / "home with spaces"
+            runtime = home / ".cache/codex-runtimes/runtime with spaces/dependencies/python/bin/python3"
+            write_fake_python(runtime, compatible=True)
+            log = Path(directory) / "bootstrap.log"
+            environment = {
+                **os.environ,
+                "PATH": f"{binaries}:/usr/bin:/bin",
+                "HOME": str(home),
+                "BOOTSTRAP_LOG": str(log),
+            }
+            found = subprocess.run(
+                ["sh", str(script)], env=environment, capture_output=True, text=True
+            )
+            self.assertEqual(0, found.returncode, found.stderr)
+            self.assertTrue(all(line.startswith(f"{runtime}|") for line in log.read_text().splitlines()))
+
+            runtime.unlink()
+            missing = subprocess.run(
+                ["sh", str(script)], env=environment, capture_output=True, text=True
+            )
+            self.assertNotEqual(0, missing.returncode)
+            self.assertIn("python 3.11", missing.stderr.lower())
+            self.assertIn("harness_python", missing.stderr.lower())
+
+    def test_bootstrap_rejects_incompatible_harness_python_without_running_steps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "package"
+            base.mkdir()
+            script = make_bootstrap_fixture(base)
+            python = Path(directory) / "python3.10"
+            write_fake_python(python, compatible=False)
+            log = Path(directory) / "bootstrap.log"
+            result = subprocess.run(
+                ["sh", str(script)],
+                env={
+                    **os.environ,
+                    "HARNESS_PYTHON": str(python),
+                    "BOOTSTRAP_LOG": str(log),
+                    "HOME": str(Path(directory) / "home"),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(log.exists())
+            self.assertIn("harness_python", result.stderr.lower())
+            self.assertIn("python 3.11", result.stderr.lower())
 
 
 if __name__ == "__main__":

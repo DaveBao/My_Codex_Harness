@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Diagnose prerequisites, an installation, or an offline bundle."""
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -15,7 +17,7 @@ from pathlib import Path, PurePosixPath
 
 try:
     import tomllib
-except ImportError:  # Python 3.10
+except ImportError:  # Let Python <3.11 reach the clear prerequisite error in main().
     tomllib = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,103 +100,12 @@ def _validate_bundle_manifest(value: object, label: str) -> dict[str, str]:
 
 
 def _validate_toml_parseability(text: str) -> None:
-    """Validate TOML, falling back to conservative lexical checks on Python 3.10.
-
-    The fallback is intentionally not a full semantic TOML parser. It accepts
-    common Codex configuration forms while failing closed on unterminated
-    headers, strings, arrays, and inline tables.
-    """
-    if tomllib is not None:
-        try:
-            tomllib.loads(text)
-        except tomllib.TOMLDecodeError as error:
-            raise ValueError(f"config.toml is not parseable TOML: {error}") from error
-        return
-    _validate_toml_lexically(text)
-
-
-def _validate_toml_lexically(text: str) -> None:
-    stack: list[str] = []
-    delimiter = None
-    comment = False
-    header_open = False
-    line_has_token = False
-    index = 0
-    while index < len(text):
-        character = text[index]
-        if comment:
-            if character in "\r\n":
-                comment = False
-                line_has_token = False
-            index += 1
-            continue
-        if delimiter is not None:
-            if len(delimiter) == 3:
-                if delimiter == '"""' and character == "\\":
-                    index += 2
-                elif text.startswith(delimiter, index):
-                    delimiter = None
-                    index += 3
-                else:
-                    index += 1
-                continue
-            if character in "\r\n":
-                raise ValueError("config.toml has an unterminated string")
-            if delimiter == '"' and character == "\\":
-                if index + 1 >= len(text) or text[index + 1] in "\r\n":
-                    raise ValueError("config.toml has an unterminated string")
-                index += 2
-            elif character == delimiter:
-                delimiter = None
-                index += 1
-            else:
-                index += 1
-            continue
-        if character == "#":
-            comment = True
-            index += 1
-            continue
-        if character in "\r\n":
-            if header_open:
-                raise ValueError("config.toml has an unterminated table header")
-            line_has_token = False
-            index += 1
-            continue
-        if character.isspace():
-            index += 1
-            continue
-        if character in "'\"":
-            triple = character * 3
-            delimiter = triple if text.startswith(triple, index) else character
-            line_has_token = True
-            index += len(delimiter)
-            continue
-        if character in "[{":
-            if character == "[" and not stack and not line_has_token:
-                header_open = True
-            stack.append(character)
-            line_has_token = True
-            index += 1
-            continue
-        if character in "]}":
-            expected = "[" if character == "]" else "{"
-            if not stack or stack[-1] != expected:
-                raise ValueError("config.toml has mismatched brackets or braces")
-            stack.pop()
-            if header_open and not stack:
-                header_open = False
-            line_has_token = True
-            index += 1
-            continue
-        line_has_token = True
-        index += 1
-    if delimiter is not None:
-        raise ValueError("config.toml has an unterminated string")
-    if header_open:
-        raise ValueError("config.toml has an unterminated table header")
-    if stack:
-        name = "array" if stack[-1] == "[" else "inline table"
-        raise ValueError(f"config.toml has an unterminated {name}")
+    if tomllib is None:
+        raise ValueError("Python 3.11 or newer is required for TOML validation")
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"config.toml is not parseable TOML: {error}") from error
 
 
 def _check_writable_directory(home: Path, target: Path) -> None:
@@ -351,8 +262,8 @@ def _validate_install_state(home: Path, state: object) -> None:
 
 
 def _check_prerequisites(home: Path, require_codex: bool) -> list[str]:
-    if sys.version_info < (3, 10):
-        raise ValueError("Python 3.10 or newer is required")
+    if sys.version_info < (3, 11):
+        raise ValueError("Python 3.11 or newer is required")
     validate_home(home)
     _check_writable_directory(home, home / ".codex")
     _check_writable_directory(home, home / ".agents")
@@ -479,7 +390,9 @@ def _verify_extracted_package(root: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=f"{__doc__} Requires Python 3.11 or newer."
+    )
     parser.add_argument("--installed", action="store_true", help="validate installed ownership")
     parser.add_argument("--bundle", type=Path, help="validate an offline archive")
     parser.add_argument("--require-codex", action="store_true", help="require the Codex executable")
