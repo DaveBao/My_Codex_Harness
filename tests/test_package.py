@@ -1,5 +1,6 @@
 import json
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,17 @@ from scripts.package_model import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+README_SKILLS = (
+    "grill-me",
+    "grilling",
+    "init-project",
+    "to-exec-plan",
+    "orchestrator",
+    "builder",
+    "reviewer",
+    "librarian",
+    "complete-project",
+)
 
 
 class PackageContractTests(unittest.TestCase):
@@ -36,6 +48,46 @@ class PackageContractTests(unittest.TestCase):
         self.assertEqual([], missing)
         empty = [name for name in required if not (ROOT / name).read_text().strip()]
         self.assertEqual([], empty)
+
+    def test_readme_is_complete_operator_guide(self):
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        headings = (
+            "## Dormant By Default",
+            "## Prerequisites",
+            "## Installation",
+            "## Five-Minute Quickstart",
+            "## Complete Workflow",
+            "## Modules",
+            "## State And Ownership",
+            "## Timing And Token Telemetry",
+            "## Resume, Recovery, And Troubleshooting",
+            "## Migration, Upgrade, Rollback, And Uninstall",
+            "## Development And Release Validation",
+            "## Known Boundaries",
+        )
+        for heading in headings:
+            self.assertIn(heading, text)
+        for name in README_SKILLS:
+            self.assertIn(f"`{name}`", text)
+        for command in (
+            "scripts/doctor.py",
+            "scripts/install.py --dry-run",
+            "scripts/install.py --yes",
+            "scripts/doctor.py --installed",
+            "scripts/build_bundle.py --output",
+            "scripts/uninstall.py --dry-run",
+            "scripts/uninstall.py --yes",
+        ):
+            self.assertIn(command, text)
+        self.assertIn("durationMs", text)
+        self.assertRegex(text, r"(?i)token.*null|null.*token")
+        self.assertNotIn("`/run`", text)
+
+        for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", text):
+            if "://" in target or target.startswith("#"):
+                continue
+            path = target.split("#", 1)[0]
+            self.assertTrue((ROOT / path).exists(), f"broken README link: {target}")
 
     def test_plugin_manifest_contract(self):
         path = ROOT / ".codex-plugin/plugin.json"
