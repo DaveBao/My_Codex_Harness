@@ -3,4 +3,4 @@ interface:
   short_description: "Review one harness feature with evidence"
   default_prompt: "Use $reviewer to verify one assigned feature against every acceptance criterion."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

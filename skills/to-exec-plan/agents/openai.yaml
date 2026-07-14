@@ -3,4 +3,4 @@ interface:
   short_description: "Convert approved PRDs into harness TODO plans"
   default_prompt: "Use $to-exec-plan to convert this approved PRD into a harness-ready TODO.json execution plan."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

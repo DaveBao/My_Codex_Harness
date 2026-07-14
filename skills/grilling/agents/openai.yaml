@@ -3,4 +3,4 @@ interface:
   short_description: "Stress-test plans through focused questioning"
   default_prompt: "Use $grilling to stress-test this plan one decision at a time."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

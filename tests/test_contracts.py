@@ -233,7 +233,7 @@ class SkillContractTests(unittest.TestCase):
                 self.assertGreaterEqual(len(short), 25)
                 self.assertLessEqual(len(short), 64)
                 self.assertIn(f"${skill}", openai.get("default_prompt", ""))
-                self.assertIs(True, openai.get("allow_implicit_invocation"))
+                self.assertIs(False, openai.get("allow_implicit_invocation"))
 
     def test_grill_wrapper_and_upstream_bytes_remain_pinned(self):
         wrapper = (ROOT / "skills/grill-me/SKILL.md").read_text(encoding="utf-8")

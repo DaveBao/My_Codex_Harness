@@ -3,4 +3,4 @@ interface:
   short_description: "Update navigation after validated merges"
   default_prompt: "Use $librarian after a validated merge to update project navigation and necessary durable docs."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

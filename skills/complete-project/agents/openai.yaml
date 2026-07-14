@@ -3,4 +3,4 @@ interface:
   short_description: "Verify and close a completed harness run"
   default_prompt: "Use $complete-project to verify this harness run and prepare an owner-gated completion report."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false
