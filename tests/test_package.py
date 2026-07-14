@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 README_SKILLS = (
     "grill-me",
     "grilling",
+    "to-spec",
     "init-project",
     "to-exec-plan",
     "orchestrator",

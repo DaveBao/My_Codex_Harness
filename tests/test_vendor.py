@@ -10,10 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_URL = "https://github.com/mattpocock/skills.git"
 SOURCE_TAG = "v1.1.0"
 SOURCE_COMMIT = "d574778f94cf620fcc8ce741584093bc650a61d3"
-SKILLS = ("grill-me", "grilling")
+SKILLS = ("grill-me", "grilling", "to-spec")
 ACTIVE_SKILLS = {
     "grill-me",
     "grilling",
+    "to-spec",
     "init-project",
     "to-exec-plan",
     "orchestrator",
@@ -26,6 +27,7 @@ UPSTREAM_LICENSE_SHA256 = "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31
 UPSTREAM_SKILL_HASHES = {
     "skills/grill-me/upstream/SKILL.md": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54",
     "skills/grilling/upstream/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
+    "skills/to-spec/upstream/SKILL.md": "267638edd513b5918de626ad5605d261952abb7428cb308869c663ca924e93e7",
 }
 PROVENANCE_REQUIREMENTS = {
     "grill-me": (
@@ -43,6 +45,14 @@ PROVENANCE_REQUIREMENTS = {
         "- Original path: `skills/productivity/grilling/SKILL.md`",
         "- License: MIT; see `LICENSE.upstream` in this directory.",
         "- Local status: `SKILL.md` is an Owner-gated Codex adapter, while `upstream/SKILL.md` and `LICENSE.upstream` are unmodified upstream files. This provenance file is a local companion.",
+    ),
+    "to-spec": (
+        f"- Source: {SOURCE_URL}",
+        f"- Tag: `{SOURCE_TAG}`",
+        f"- Resolved commit: `{SOURCE_COMMIT}`",
+        "- Original path: `skills/engineering/to-spec/SKILL.md`, preserved at `upstream/SKILL.md`.",
+        "- License: MIT; see `LICENSE.upstream` in this directory.",
+        "- Local status: `SKILL.md` is an Owner-gated Harness adapter, while `upstream/SKILL.md` and `LICENSE.upstream` are unmodified upstream files. This provenance file is a local companion.",
     ),
 }
 
@@ -158,7 +168,7 @@ class VendoredGrillTests(unittest.TestCase):
         recorded = {
             path: digest
             for path, digest in re.findall(
-                r"^\| `((?:skills/(?:grill-me|grilling)/)[^`]+)` \| `([0-9a-f]{64})` \|",
+                r"^\| `((?:skills/(?:grill-me|grilling|to-spec)/)[^`]+)` \| `([0-9a-f]{64})` \|",
                 document,
                 re.MULTILINE,
             )

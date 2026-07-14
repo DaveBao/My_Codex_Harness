@@ -1,6 +1,6 @@
 # My Codex Harness
 
-My Codex Harness is a reusable, progressive-disclosure engineering workflow for Codex. It connects requirements discovery, project initialization, execution planning, isolated implementation, independent review, serialized integration, documentation maintenance, observability, and owner-approved project completion.
+My Codex Harness is a reusable, progressive-disclosure engineering workflow for Codex. It connects requirements discovery, PRD synthesis, project initialization, execution planning, isolated implementation, independent review, serialized integration, documentation maintenance, observability, and owner-approved project completion.
 
 The repository is both the source of the `my-codex-harness` plugin and a portable user-level installer. Its workflow contracts are Markdown skills; its delegated Builder, Reviewer, and Librarian agents are small Codex runtime adapters.
 
@@ -13,6 +13,7 @@ Installing or initializing Harness does not make every Codex request enter the w
 | Explicit Owner invocation | Activated scope |
 | --- | --- |
 | `$grill-me` or `$grilling` | Stress-test requirements or design; no implementation |
+| `$to-spec` | Synthesize resolved discussion into the canonical PRD; no planning or implementation |
 | `$init-project` | Initialize or adopt a repository; no planning or implementation |
 | `$to-exec-plan` | Convert an approved PRD into active TODO JSON; no implementation |
 | `$orchestrator` | Start or resume the full execution workflow |
@@ -116,13 +117,19 @@ The following is the shortest complete path for a new or existing Git repository
 
    The initializer previews or creates project guidance, active workflow state, runtime adapters, schemas, and empty worklogs without committing or pushing.
 
-2. Write the requirements in `docs/product-specs/prd.md`. For uncertain requirements, explicitly run:
+2. Resolve uncertain requirements explicitly:
 
    ```text
    $grill-me
    ```
 
-   Resolve one decision at a time, then update and approve the PRD. Grilling does not implement the design.
+   Resolve one decision at a time. Grilling does not write the PRD or implement the design. Then synthesize the resolved conversation:
+
+   ```text
+   $to-spec
+   ```
+
+   Confirm the proposed observable test seams, review `docs/product-specs/prd.md`, and approve it. `to-spec` does not generate TODO state, implement code, or publish to an external issue tracker without a separate explicit request.
 
 3. Generate the execution plan:
 
@@ -170,9 +177,13 @@ The gated adapter loads the pinned upstream grilling workflow and asks one decis
 
 Output: resolved requirements and decisions suitable for a PRD.
 
-### 2. PRD creation and approval
+### 2. PRD synthesis and approval
 
-The Owner records the approved product requirements in `docs/product-specs/prd.md`. A useful PRD states the problem, success criteria, scope, non-goals, constraints, implementation direction, and unresolved questions.
+Owner entry: `$to-spec`.
+
+`to-spec` synthesizes the current resolved conversation and relevant codebase understanding into `docs/product-specs/prd.md`; it does not restart the grilling interview. It uses the pinned upstream spec shape: problem statement, solution, user stories, implementation decisions, testing decisions, out of scope, and further notes.
+
+Before writing, it presents the highest practical observable test seams for Owner confirmation. It does not initialize Harness state, write `TODO.json`, implement code, commit, push, or publish externally unless the Owner separately requests external issue publication.
 
 Planning and implementation must not invent materially missing requirements. The Owner approves the PRD before execution planning.
 
@@ -293,6 +304,7 @@ It does not commit, push, delete, move the active TODO, or claim closure. Only a
 | --- | --- | --- |
 | `grill-me` | Codex-compatible explicit entry for requirements grilling | [skills/grill-me](skills/grill-me/) |
 | `grilling` | Owner-gated adapter to pinned upstream questioning behavior | [skills/grilling](skills/grilling/) |
+| `to-spec` | Owner-gated synthesis of resolved discussion into the canonical PRD | [skills/to-spec](skills/to-spec/) |
 | `init-project` | Non-destructive project initialization and adoption | [skills/init-project](skills/init-project/) |
 | `to-exec-plan` | Approved PRD to dependency-aware active TODO JSON | [skills/to-exec-plan](skills/to-exec-plan/) |
 | `orchestrator` | Activation, scheduling, assignments, integration, state, telemetry, and checkpoints | [skills/orchestrator](skills/orchestrator/) |
@@ -321,9 +333,10 @@ My_Codex_Harness/
 ├── agents/
 ├── skills/
 │   ├── grill-me/          ├── grilling/
-│   ├── init-project/      ├── to-exec-plan/
-│   ├── orchestrator/      ├── builder/
-│   ├── reviewer/          ├── librarian/
+│   ├── to-spec/           ├── init-project/
+│   ├── to-exec-plan/      ├── orchestrator/
+│   ├── builder/           ├── reviewer/
+│   ├── librarian/
 │   └── complete-project/
 ├── scaffold/
 ├── schemas/
@@ -355,6 +368,7 @@ Lifecycle telemetry and checkpoints support decisions but never override `TODO.j
 | Role | May change | Must not change or decide |
 | --- | --- | --- |
 | Owner | Requirements, approvals, activation, gated risk decisions | Nothing is delegated implicitly |
+| `to-spec` | Canonical PRD after test-seam confirmation | TODO state, product code, role events, external publication without explicit request |
 | `to-exec-plan` | Feature definitions in active TODO | Product code, role events, status execution |
 | Orchestrator | Status, attempts, shared events, assignments, merge, checkpoints | Business code, acceptance judgment |
 | Builder | One assigned feature's source/tests and local commit | TODO status, shared JSONL, Reviewer evidence |
@@ -509,7 +523,7 @@ Project governance and reporting:
 - [Changelog](CHANGELOG.md)
 - [MIT license](LICENSE)
 - [Third-party notices](NOTICE)
-- [Pinned upstream grilling provenance](docs/upstream-grill.md)
+- [Pinned upstream skill provenance](docs/upstream-grill.md)
 - [Owner-gated activation design](docs/superpowers/specs/2026-07-14-owner-gated-activation-and-readme-design.md)
 
 ## Known Boundaries
@@ -524,4 +538,4 @@ Project governance and reporting:
 
 ## License And Third-Party Content
 
-My Codex Harness is released under the [MIT License](LICENSE). The vendored `grill-me` and `grilling` workflows come from `mattpocock/skills` release `v1.1.0` and retain their MIT license and exact upstream source files. See [NOTICE](NOTICE) and [the upstream audit record](docs/upstream-grill.md).
+My Codex Harness is released under the [MIT License](LICENSE). The vendored `grill-me`, `grilling`, and `to-spec` workflows come from `mattpocock/skills` release `v1.1.0` and retain their MIT license and exact upstream source files. See [NOTICE](NOTICE) and [the upstream audit record](docs/upstream-grill.md).

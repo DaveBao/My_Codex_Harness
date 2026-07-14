@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILLS = (
     "grill-me",
     "grilling",
+    "to-spec",
     "init-project",
     "to-exec-plan",
     "orchestrator",
@@ -26,10 +27,12 @@ SKILLS = (
 UPSTREAM_HASHES = {
     "skills/grill-me/upstream/SKILL.md": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54",
     "skills/grilling/upstream/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
+    "skills/to-spec/upstream/SKILL.md": "267638edd513b5918de626ad5605d261952abb7428cb308869c663ca924e93e7",
 }
 OWNER_ENTRY_SKILLS = {
     "grill-me": ("$grill-me",),
     "grilling": ("$grilling", "$grill-me"),
+    "to-spec": ("$to-spec",),
     "init-project": ("$init-project",),
     "to-exec-plan": ("$to-exec-plan",),
     "orchestrator": ("$orchestrator", "/harness run", "/harness resume"),
@@ -225,7 +228,7 @@ def type_matches(kind: str, value: object) -> bool:
 
 
 class SkillContractTests(unittest.TestCase):
-    def test_all_nine_skills_have_valid_metadata(self):
+    def test_all_skills_have_valid_metadata(self):
         for skill in SKILLS:
             with self.subTest(skill=skill):
                 directory = ROOT / "skills" / skill
@@ -344,6 +347,15 @@ class SkillContractTests(unittest.TestCase):
         planner = (ROOT / "skills/to-exec-plan/SKILL.md").read_text(encoding="utf-8")
         self.assertRegex(planner, r"Do not write `worklog/handoffs\.jsonl` or `worklog/logs/lifecycle\.jsonl`")
         self.assertNotRegex(planner, r"(?i)append.*worklog/handoffs\.jsonl")
+
+    def test_to_spec_synthesizes_prd_without_crossing_phase_boundaries(self):
+        text = (ROOT / "skills/to-spec/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("docs/product-specs/prd.md", text)
+        self.assertIn("$to-exec-plan", text)
+        self.assertRegex(text, r"(?i)do not.*interview|does not restart.*interview")
+        self.assertRegex(text, r"(?i)external issue.*explicit")
+        self.assertIn("TODO.json", text)
+        self.assertRegex(text, r"(?i)do not.*TODO\.json|must not.*TODO\.json")
 
 
 class AgentContractTests(unittest.TestCase):

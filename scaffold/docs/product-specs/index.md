@@ -1,3 +1,3 @@
 # Product Specs
 
-- `prd.md`: product requirements source for `to-exec-plan`.
+- `prd.md`: canonical product spec written by `to-spec`, approved by the Owner, and consumed by `to-exec-plan`.

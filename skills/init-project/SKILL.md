@@ -48,4 +48,4 @@ Do not assume a repository-local `.agents/skills/` path. If running from another
 
 ## After Init
 
-Use `to-exec-plan` to fill `TODO.json` from `docs/product-specs/prd.md` or an explicitly provided PRD document. During `/run`, the orchestrator merges passed work, then invokes Librarian to update `docs/project-map.md` and affected project docs from the merged diff.
+Use `$to-spec` to synthesize resolved requirements into `docs/product-specs/prd.md`, then use `$to-exec-plan` to fill `TODO.json` from the Owner-approved PRD. During `/harness run`, the orchestrator merges passed work, then invokes Librarian to update `docs/project-map.md` and affected project docs from the merged diff.

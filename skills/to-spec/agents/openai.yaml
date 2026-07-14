@@ -1,0 +1,6 @@
+interface:
+  display_name: "To Spec"
+  short_description: "Synthesize approved discussion into the Harness PRD"
+  default_prompt: "Use $to-spec to synthesize this resolved discussion into docs/product-specs/prd.md."
+policy:
+  allow_implicit_invocation: false

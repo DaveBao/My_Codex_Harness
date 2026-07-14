@@ -1,4 +1,4 @@
-# Vendored grill skills
+# Vendored Matt Pocock skills
 
 ## Source and scope
 
@@ -7,14 +7,12 @@
 - Resolved commit: `d574778f94cf620fcc8ce741584093bc650a61d3`
 - License: MIT
 
-Only the upstream `grill-me` and `grilling` skills are included. Their pinned
-`SKILL.md` files reference no relative assets, scripts, or supporting files,
-so no unrelated upstream skills or resources are vendored. The exact upstream
-`grill-me` file is preserved at `skills/grill-me/upstream/SKILL.md`, and the
-exact upstream `grilling` file is preserved at
-`skills/grilling/upstream/SKILL.md`. The active top-level files are local
-Owner-gated Codex adapters; the `grill-me` adapter also omits the unsupported
-upstream `disable-model-invocation: true` field.
+Only the upstream `grill-me`, `grilling`, and `to-spec` skills are included.
+Their pinned `SKILL.md` files reference no required relative assets or scripts,
+so no unrelated upstream skills or resources are vendored. Exact upstream files
+are preserved under each skill's `upstream/SKILL.md`. The active top-level files
+are local Owner-gated Codex/Harness adapters that omit the unsupported upstream
+`disable-model-invocation: true` field.
 
 ## File inventory
 
@@ -30,8 +28,13 @@ upstream `disable-model-invocation: true` field.
 | `skills/grilling/UPSTREAM.md` | `57210b403fda80c1c6dfa10fd9364c69400209a8abb57984246994524bd6ebb2` | Not applicable | Local provenance companion |
 | `skills/grilling/agents/openai.yaml` | `bd8445e71a0ecb96301e25182943cfa20f641345d50ea6b30dc2293b690fb678` | Not applicable | Local Codex skill metadata |
 | `skills/grilling/upstream/SKILL.md` | `5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478` | `skills/productivity/grilling/SKILL.md` | Unmodified upstream file |
+| `skills/to-spec/LICENSE.upstream` | `0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5` | `LICENSE` | Unmodified upstream file |
+| `skills/to-spec/SKILL.md` | `4f8b51f3374eaef34188096572ac8843e0d0a4ab34ca37d508e947579b5616e2` | Not applicable | Local Owner-gated Harness adapter |
+| `skills/to-spec/UPSTREAM.md` | `1b5e542fe47ff497d374dd18710345d225961f62adec6cb939723e9123a0e89c` | Not applicable | Local provenance companion |
+| `skills/to-spec/agents/openai.yaml` | `dd58f260510578ef161625a100effa01af5561d8a08258bdeab2f91344e0c3fe` | Not applicable | Local Codex skill metadata |
+| `skills/to-spec/upstream/SKILL.md` | `267638edd513b5918de626ad5605d261952abb7428cb308869c663ca924e93e7` | `skills/engineering/to-spec/SKILL.md` | Unmodified upstream file |
 
-The two active `SKILL.md` adapters, two `UPSTREAM.md` files, and Codex
+The three active `SKILL.md` adapters, three `UPSTREAM.md` files, and Codex
 `agents/openai.yaml` metadata are local additions. `NOTICE` and this document
 are also local attribution changes. Only the `upstream/SKILL.md` and
 `LICENSE.upstream` files are byte-for-byte copies from the pinned checkout.
@@ -40,12 +43,12 @@ are also local attribution changes. Only the `upstream/SKILL.md` and
 
 1. Resolve the requested tag independently with `git ls-remote --tags` and
    require its peeled commit to match the intended pin.
-2. Check out that exact commit in a temporary clone. Inspect both `SKILL.md`
+2. Check out that exact commit in a temporary clone. Inspect every vendored `SKILL.md`
    files for relative references and add only directly required files.
-3. Replace `grill-me/upstream/SKILL.md`, `grilling/upstream/SKILL.md`, and each
+3. Replace each `upstream/SKILL.md` and
    `LICENSE.upstream` with exact copies from the verified checkout. Do not edit
    those upstream files locally.
-4. Keep both active wrappers limited to explicit Owner activation and upstream
+4. Keep active wrappers limited to explicit Owner activation and upstream
    delegation. Update the directory-local provenance companions, this inventory,
    and `NOTICE`. Recalculate every inventoried SHA-256.
 5. For an intentional upstream upgrade, update the immutable
@@ -72,6 +75,7 @@ python3 -m unittest discover -s tests -v
 python3 "$codex_home/skills/.system/plugin-creator/scripts/validate_plugin.py" .
 python3 "$codex_home/skills/.system/skill-creator/scripts/quick_validate.py" skills/grill-me
 python3 "$codex_home/skills/.system/skill-creator/scripts/quick_validate.py" skills/grilling
+python3 "$codex_home/skills/.system/skill-creator/scripts/quick_validate.py" skills/to-spec
 git diff --check
 ```
 
@@ -85,6 +89,7 @@ py -3 -m unittest discover -s tests -v
 py -3 (Join-Path $CodexHome "skills/.system/plugin-creator/scripts/validate_plugin.py") .
 py -3 (Join-Path $CodexHome "skills/.system/skill-creator/scripts/quick_validate.py") skills/grill-me
 py -3 (Join-Path $CodexHome "skills/.system/skill-creator/scripts/quick_validate.py") skills/grilling
+py -3 (Join-Path $CodexHome "skills/.system/skill-creator/scripts/quick_validate.py") skills/to-spec
 git diff --check
 ```
 

@@ -37,4 +37,4 @@ The only workflow-mutable top-level feature fields are `status`, `attemptCount`,
 Preserve existing features, `status`, `attemptCount`, `handoffReferences`, and `validationHistory`. Allocate IDs after the active maximum. Block only on unfinished active features, treat completed work as assumptions, validate dependency existence and acyclicity, and record stale navigation as a librarian follow-up rather than expanding this role.
 
 ## Finish
-Report changed files, DAG validation, unresolved questions, and the next entry point: `$orchestrator` or `/run`.
+Report changed files, DAG validation, unresolved questions, and the next entry point: `$orchestrator` or `/harness run`.
