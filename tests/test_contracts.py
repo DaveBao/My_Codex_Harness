@@ -285,6 +285,13 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("/harness resume", text)
         self.assertRegex(text, r"(?i)checkpoint.*never.*activate|never.*activate.*checkpoint")
 
+    def test_codex_runtime_closure_matches_initialized_scaffold(self):
+        text = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        for role in ("builder", "reviewer", "librarian"):
+            self.assertIn(f".codex/agents/harness-{role}.toml", text)
+            self.assertNotIn(f".codex/agents/{role}.toml", text)
+        self.assertNotIn("`docs/codex-policy.md`", text)
+
     def test_role_skills_resolve_helper_from_active_skill(self):
         for role in ("orchestrator", "builder", "reviewer"):
             text = (ROOT / "skills" / role / "SKILL.md").read_text(encoding="utf-8")

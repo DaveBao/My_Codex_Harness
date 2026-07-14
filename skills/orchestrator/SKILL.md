@@ -50,7 +50,7 @@ For an Orchestrator-owned debug run, persist returned handoff and lifecycle obje
 - Orchestrator owns worktree creation, assignment, verification, and cleanup. Builder never chooses or creates its worktree.
 - Record the integrated base SHA before creating work. The project static committed closure is `AGENTS.md`, `docs/references/builder-handoff.schema.json`, `docs/references/lifecycle-event.schema.json`, and `docs/references/worklog-events.md`. The installed role closure is the active Orchestrator, Builder, Reviewer, and Librarian skills plus the resolved absolute helper; require all five files to be readable before dispatch.
 - Add exactly one selected runtime closure:
-  - Codex: `docs/codex-policy.md`, `.codex/config.toml`, `.codex/agents/builder.toml`, `.codex/agents/reviewer.toml`, and `.codex/agents/librarian.toml`.
+  - Codex: `.codex/config.toml`, `.codex/agents/harness-builder.toml`, `.codex/agents/harness-reviewer.toml`, and `.codex/agents/harness-librarian.toml`.
   - Claude: `CLAUDE.md`, `.claude/commands/run.md`, `.claude/agents/builder.md`, `.claude/agents/reviewer.md`, and `.claude/agents/librarian.md`.
   - Another runtime: its explicit Orchestrator entry point and Builder, Reviewer, and Librarian adapters.
 - For every project static committed closure and selected runtime closure path, run `git cat-file -e "<baseSha>:<path>"`, then compare `git hash-object --path="$path" "$path"` with `git rev-parse "$baseSha:$path"`. Absence or different content returns `blocked(harness_not_committed)` before spawning Builder.
