@@ -63,6 +63,10 @@ class PackageContractTests(unittest.TestCase):
             self.assertIn(key, interface)
             self.assertTrue(interface[key])
         self.assertEqual("Developer Tools", interface["category"])
+        prompt = "\n".join(interface["defaultPrompt"])
+        self.assertIn("explicit", prompt.lower())
+        self.assertIn("$orchestrator", prompt)
+        self.assertNotIn("Use My Codex Harness to plan and execute", prompt)
         for key in ("apps", "mcpServers", "hooks"):
             self.assertNotIn(key, manifest)
         for key in ("composerIcon", "logo", "logoDark", "screenshots"):

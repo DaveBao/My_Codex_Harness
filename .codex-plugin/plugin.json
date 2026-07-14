@@ -11,14 +11,14 @@
   "interface": {
     "displayName": "My Codex Harness",
     "shortDescription": "A reliable engineering workflow for Codex projects.",
-    "longDescription": "Plan, build, review, and validate Codex projects with a small, reusable engineering harness.",
+    "longDescription": "An owner-activated workflow for requirements, planning, isolated implementation, independent review, integration, documentation, and completion.",
     "developerName": "Dave Bao",
     "category": "Developer Tools",
     "capabilities": [
       "Skills"
     ],
     "defaultPrompt": [
-      "Use My Codex Harness to plan and execute this engineering task."
+      "Harness is dormant by default. Explicitly invoke $init-project, $to-exec-plan, $orchestrator, or $complete-project; use /harness run or /harness resume for a full run. Ordinary tasks remain normal Codex work."
     ]
   }
 }

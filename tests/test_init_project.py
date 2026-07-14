@@ -786,6 +786,15 @@ class InitProjectTests(unittest.TestCase):
         skill = (ROOT / "skills/init-project/SKILL.md").read_text()
         self.assertIn("`.codex/config.toml` is project-owned once created", skill)
 
+    def test_scaffold_is_dormant_without_owner_invocation(self):
+        text = (SCAFFOLD / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("## Dormant By Default", text)
+        self.assertIn("$orchestrator", text)
+        self.assertIn("/harness run", text)
+        self.assertIn("/harness resume", text)
+        self.assertRegex(text, r"(?i)ordinary tasks.*normal Codex")
+        self.assertRegex(text, r"(?i)TODO.*never.*activate|checkpoint.*never.*activate")
+
 
 if __name__ == "__main__":
     unittest.main()

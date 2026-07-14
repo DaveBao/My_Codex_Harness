@@ -39,19 +39,19 @@ DELEGATED_ROLE_SKILLS = ("builder", "reviewer", "librarian")
 AGENTS = {
     "harness-builder.toml": {
         "name": "harness-builder",
-        "description": "Build one harness feature and produce a ready-for-review handoff.",
+        "description": "Delegated Builder for one feature in an Owner-activated Harness run.",
         "model_reasoning_effort": "high",
         "role": "Builder",
     },
     "harness-reviewer.toml": {
         "name": "harness-reviewer",
-        "description": "Review one feature against every acceptance criterion using independent runtime evidence.",
+        "description": "Delegated Reviewer for one feature in an Owner-activated Harness run.",
         "model_reasoning_effort": "high",
         "role": "Reviewer",
     },
     "harness-librarian.toml": {
         "name": "harness-librarian",
-        "description": "Update project navigation after merged work passes global validation.",
+        "description": "Delegated Librarian for validated work in an Owner-activated Harness run.",
         "model_reasoning_effort": "medium",
         "role": "Librarian",
     },
@@ -356,6 +356,14 @@ class AgentContractTests(unittest.TestCase):
                 self.assertNotIn("sandbox_mode", data)
                 self.assertNotIn("permissions", data)
                 self.assertNotIn("harness_v2", path.read_text(encoding="utf-8"))
+
+    def test_global_agents_require_owner_activation_envelope(self):
+        for filename in AGENTS:
+            with self.subTest(agent=filename):
+                text = (ROOT / "agents" / filename).read_text(encoding="utf-8")
+                for field in ("harnessRunId", "activatedByOwner", "activationCommand"):
+                    self.assertIn(field, text)
+                self.assertRegex(text, r"(?i)stop before.*state|before.*state.*stop")
 
 
 class SchemaContractTests(unittest.TestCase):
