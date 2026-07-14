@@ -95,6 +95,12 @@ Update Harness-authored skill descriptions to state explicit activation rules:
 
 The body of every Harness-authored skill repeats its hard gate before operational instructions. Front matter improves discovery behavior; the body prevents accidental continuation after discovery.
 
+Every public skill's `agents/openai.yaml` sets `policy.allow_implicit_invocation: false`. This native discovery policy is the primary mechanical control: the Owner or an active Orchestrator must name the skill explicitly. Front matter and body gates remain defense in depth for runtimes or adapters that surface skill metadata differently.
+
+### Role Agent Adapters
+
+The Builder, Reviewer, and Librarian TOML adapters state that they are delegated roles only and require the same `harnessRunId`, `activatedByOwner`, and `activationCommand` envelope before loading role state. Their scaffold copies remain byte-identical to the distribution sources.
+
 ### Project Scaffold
 
 Add a leading "Dormant By Default" section to `scaffold/AGENTS.md` stating:
@@ -263,7 +269,7 @@ State that explicit activation is enforced by distributed text contracts and tes
 
 Implementation follows test-first contract changes.
 
-1. Add failing contract tests that reject broad auto-trigger front matter and require exact Owner activation language for Harness-authored entry skills.
+1. Add failing contract tests that require `allow_implicit_invocation: false`, reject broad auto-trigger front matter, and require exact Owner activation language for Harness-authored entry skills.
 2. Add failing tests that require Builder, Reviewer, and Librarian to document the activation envelope and reject missing assignments before state access.
 3. Add failing scaffold tests for the dormant-by-default section and explicit activation table/wording.
 4. Add failing plugin-manifest tests ensuring the default prompt describes explicit invocation and does not instruct automatic use.
@@ -288,6 +294,11 @@ Expected distribution changes:
 - `skills/complete-project/SKILL.md`
 - `skills/grill-me/SKILL.md`
 - `skills/grilling/SKILL.md` as the public gated adapter, while preserving the pristine upstream resource
+- `skills/*/agents/openai.yaml`
+- `agents/harness-builder.toml`
+- `agents/harness-reviewer.toml`
+- `agents/harness-librarian.toml`
+- matching `scaffold/.codex/agents/harness-*.toml` copies
 - `scaffold/AGENTS.md`
 - `.codex-plugin/plugin.json`
 - `README.md`
