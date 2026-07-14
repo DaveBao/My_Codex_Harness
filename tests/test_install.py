@@ -38,6 +38,22 @@ def run_script(script: Path, home: Path, *args: str) -> subprocess.CompletedProc
     )
 
 
+def run_script_with_python(
+    python: Path, script: Path, home: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return subprocess.run(
+        [str(python), str(script), *args],
+        cwd=script.parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
 def run_python(home: Path, code: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -102,6 +118,40 @@ def leave_upgrade_cleanup_warning(installer, source: Path, home: Path) -> dict:
 
 
 class InstallTests(unittest.TestCase):
+    def test_public_deployment_clis_reject_python_before_3_11_without_writing(self):
+        candidates = [Path(path) for path in (shutil.which("python3"), "/usr/bin/python3") if path]
+        old_pythons = []
+        for python in dict.fromkeys(candidates):
+            if not python.exists():
+                continue
+            version = subprocess.run(
+                [str(python), "-c", "import sys; print(*sys.version_info[:2])"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if tuple(map(int, version.stdout.split())) < (3, 11):
+                old_pythons.append(python)
+        if not old_pythons:
+            self.skipTest("no Python older than 3.11 is available")
+
+        for python in old_pythons:
+            for script, args in (
+                (INSTALL, ("--yes", "--copy")),
+                (UNINSTALL, ("--dry-run",)),
+            ):
+                with self.subTest(python=str(python), script=script.name), tempfile.TemporaryDirectory() as directory:
+                    home = Path(directory)
+                    before = snapshot(home)
+
+                    result = run_script_with_python(python, script, home, *args)
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual(1, len(result.stderr.splitlines()), result.stderr)
+                    self.assertIn("Python 3.11", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(before, snapshot(home))
+
     def test_dry_run_is_deterministic_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

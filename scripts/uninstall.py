@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Safely remove only My Codex Harness-owned installation paths."""
 
+from __future__ import annotations
+
+import sys
+
+
+def _reject_unsupported_python() -> bool:
+    if sys.version_info >= (3, 11):
+        return False
+    print("My Codex Harness requires Python 3.11 or newer.", file=sys.stderr)
+    return True
+
+
+if __name__ == "__main__" and _reject_unsupported_python():
+    raise SystemExit(1)
+
 import argparse
 import datetime as dt
 import hashlib
@@ -8,7 +23,6 @@ import json
 import os
 import re
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -489,6 +503,8 @@ def uninstall_package(home: Path, *, dry_run: bool = False) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if _reject_unsupported_python():
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--yes", action="store_true")

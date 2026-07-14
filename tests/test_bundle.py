@@ -138,6 +138,43 @@ def write_custom_bundle(
 
 
 class BundleTests(unittest.TestCase):
+    def test_bundle_builder_rejects_python_older_than_3_11_before_output(self):
+        candidates = dict.fromkeys(
+            candidate for candidate in (shutil.which("python3"), "/usr/bin/python3") if candidate
+        )
+        tested = 0
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for index, python in enumerate(candidates):
+                if not Path(python).is_file():
+                    continue
+                capability = subprocess.run(
+                    [
+                        python,
+                        "-c",
+                        "import sys; raise SystemExit(0 if sys.version_info < (3, 11) else 1)",
+                    ]
+                )
+                if capability.returncode != 0:
+                    continue
+                tested += 1
+                output = base / f"output-{index}"
+                result = subprocess.run(
+                    [python, str(BUILDER), "--output", str(output)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(python=python):
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertEqual(1, len(result.stderr.splitlines()), result.stderr)
+                    self.assertIn("python 3.11", result.stderr.lower())
+                    self.assertNotIn("traceback", result.stderr.lower())
+                    self.assertFalse(output.exists())
+        if not tested:
+            self.skipTest("Python older than 3.11 is unavailable")
+
     def test_bundle_is_reproducible_and_has_manifest_and_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

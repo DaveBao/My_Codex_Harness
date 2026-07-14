@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Install or upgrade My Codex Harness transactionally for one user."""
 
+from __future__ import annotations
+
+import sys
+
+
+def _reject_unsupported_python() -> bool:
+    if sys.version_info >= (3, 11):
+        return False
+    print("My Codex Harness requires Python 3.11 or newer.", file=sys.stderr)
+    return True
+
+
+if __name__ == "__main__" and _reject_unsupported_python():
+    raise SystemExit(1)
+
 import argparse
 import base64
 import datetime as dt
@@ -10,7 +25,6 @@ import os
 import re
 import shutil
 import stat
-import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -974,6 +988,8 @@ def symlinks_supported(directory: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if _reject_unsupported_python():
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="preview without writing")
     parser.add_argument("--yes", action="store_true", help="confirm installation")

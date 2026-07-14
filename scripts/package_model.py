@@ -1,5 +1,7 @@
 """Small, dependency-free helpers shared by package scripts."""
 
+from __future__ import annotations
+
 import hashlib as _hashlib
 import json as _json
 import os as _os

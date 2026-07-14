@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build a reproducible, self-contained offline Harness archive."""
 
+from __future__ import annotations
+
 import argparse
 import gzip
 import hashlib
@@ -82,6 +84,9 @@ def build_bundle(package_root: Path, output: Path) -> tuple[Path, Path, Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.version_info < (3, 11):
+        print("bundle build failed: Python 3.11 or newer is required", file=sys.stderr)
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
