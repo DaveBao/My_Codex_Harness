@@ -25,7 +25,7 @@ ACTIVE_SKILLS = {
 UPSTREAM_LICENSE_SHA256 = "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
 UPSTREAM_SKILL_HASHES = {
     "skills/grill-me/upstream/SKILL.md": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54",
-    "skills/grilling/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
+    "skills/grilling/upstream/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
 }
 PROVENANCE_REQUIREMENTS = {
     "grill-me": (
@@ -42,7 +42,7 @@ PROVENANCE_REQUIREMENTS = {
         f"- Resolved commit: `{SOURCE_COMMIT}`",
         "- Original path: `skills/productivity/grilling/SKILL.md`",
         "- License: MIT; see `LICENSE.upstream` in this directory.",
-        "- Local status: `SKILL.md` and `LICENSE.upstream` are unmodified upstream files. This provenance file is a local companion.",
+        "- Local status: `SKILL.md` is an Owner-gated Codex adapter, while `upstream/SKILL.md` and `LICENSE.upstream` are unmodified upstream files. This provenance file is a local companion.",
     ),
 }
 

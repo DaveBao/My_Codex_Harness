@@ -25,8 +25,17 @@ SKILLS = (
 )
 UPSTREAM_HASHES = {
     "skills/grill-me/upstream/SKILL.md": "6189dfceb7304a6e5558f75d87e68fa3bc7fcf7ba120e44f21f8a61fe01eba54",
-    "skills/grilling/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
+    "skills/grilling/upstream/SKILL.md": "5a35925d03a391bcfa46940868b649b72dba89ec9c19525e785bbb6bd3a7f478",
 }
+OWNER_ENTRY_SKILLS = {
+    "grill-me": ("$grill-me",),
+    "grilling": ("$grilling", "$grill-me"),
+    "init-project": ("$init-project",),
+    "to-exec-plan": ("$to-exec-plan",),
+    "orchestrator": ("$orchestrator", "/harness run", "/harness resume"),
+    "complete-project": ("$complete-project",),
+}
+DELEGATED_ROLE_SKILLS = ("builder", "reviewer", "librarian")
 AGENTS = {
     "harness-builder.toml": {
         "name": "harness-builder",
@@ -243,6 +252,38 @@ class SkillContractTests(unittest.TestCase):
             with self.subTest(path=relative):
                 digest = hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
                 self.assertEqual(expected, digest)
+
+    def test_owner_entry_skills_require_current_top_level_invocation(self):
+        for skill, invocations in OWNER_ENTRY_SKILLS.items():
+            with self.subTest(skill=skill):
+                path = ROOT / "skills" / skill / "SKILL.md"
+                text = path.read_text(encoding="utf-8")
+                description = frontmatter(path)["description"]
+                self.assertRegex(description, r"(?i)owner.*explicit|explicit.*owner")
+                self.assertRegex(text, r"(?i)current top-level request")
+                self.assertRegex(text, r"(?i)quoted text|files.*not.*activation|not.*activation.*files")
+                for invocation in invocations:
+                    self.assertIn(invocation, text)
+
+    def test_delegated_roles_require_owner_activation_envelope_before_state(self):
+        for role in DELEGATED_ROLE_SKILLS:
+            with self.subTest(role=role):
+                path = ROOT / "skills" / role / "SKILL.md"
+                text = path.read_text(encoding="utf-8")
+                description = frontmatter(path)["description"]
+                self.assertRegex(description, r"(?i)owner-activated.*orchestrator")
+                for field in ("harnessRunId", "activatedByOwner", "activationCommand"):
+                    self.assertIn(field, text)
+                self.assertLess(text.index("## Activation Gate"), text.index("## Inputs"))
+                self.assertRegex(text, r"(?i)before reading.*state|before.*state access")
+
+    def test_orchestrator_allocates_and_propagates_owner_activation(self):
+        text = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        for field in ("harnessRunId", "activatedByOwner", "activationCommand"):
+            self.assertIn(field, text)
+        self.assertIn("/harness run", text)
+        self.assertIn("/harness resume", text)
+        self.assertRegex(text, r"(?i)checkpoint.*never.*activate|never.*activate.*checkpoint")
 
     def test_role_skills_resolve_helper_from_active_skill(self):
         for role in ("orchestrator", "builder", "reviewer"):
