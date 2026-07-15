@@ -45,6 +45,7 @@ Do not read the whole TODO, sibling feature blocks, all docs, completed archives
 
 ## Build
 - Use the assigned worktree/branch and complete one visible build round per invocation.
+- One formal Builder invocation owns one session-backed feature attempt. A formal retry is a new session over the recorded worktree and branch; only Orchestrator-authorized context repair may resume the same Builder session without incrementing `attemptCount`.
 - Write scoped source and tests, run validation, and commit locally.
 - Behavior changes and bug fixes require red-to-green TDD at the AC's public seam. Text, contract, or configuration-only work is exempt unless requested.
 - Verify scope, commit identity, validation, applicable TDD evidence, locked-file/dependency constraints, and required public/API/config/setup docs before handoff.

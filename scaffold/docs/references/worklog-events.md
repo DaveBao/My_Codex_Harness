@@ -22,6 +22,10 @@ Lifecycle analytics exclude `metadata.mode == "debug"` by default and include it
 
 - `featureId` is stable and `featureName` is its title snapshot; they are both `null` or both nonblank strings.
 - Use runtime-provided token counts only. Unavailable usage is `null`; never estimate it.
+- Use exclusive token accounting: a finished span records only its own work and parent/container spans never copy child tokens.
+- Model-backed spans map official runtime Usage to `input`, `cachedInput`, `output`, and `total`; `reasoningOutputTokens` is optional numeric metadata and is already included in output.
+- Finished non-model actions use zero token counts. Missing official Usage uses `null` counts with `metadata.telemetryComplete = false` and a bounded `telemetryReason`; never estimate it.
+- Runtime metadata may include bounded `attemptNumber`, `sessionId`, `reasoningOutputTokens`, `telemetryComplete`, and `telemetryReason`.
 - For `started`, `durationMs`, `status`, `outcome`, and `error` are `null`. For `finished`, `durationMs` is measured from the persisted matching `started` timestamp and `status` is terminal.
 - Errors are bounded category/retryability/summary objects. Metadata and errors contain no raw outputs.
 

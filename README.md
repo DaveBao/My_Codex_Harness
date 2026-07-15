@@ -400,14 +400,20 @@ Role results use this telemetry shape before Orchestrator validates and persists
 
 Time is measured, not guessed. Token fields use runtime-provided usage only. When the runtime does not expose input, cached-input, output, or total token usage, the correct value is `null`; Harness never estimates it from text length or price.
 
-Use `worklog/logs/lifecycle.jsonl` for per-action duration and token analysis. Use TODO and handoffs—not telemetry—to determine workflow status.
+For Codex, the human-activated outer Codex App launcher is outside the Harness measurement boundary. The internal Runner invokes `codex exec --json` and maps official `turn.completed.usage` fields directly: `input_tokens` to input, `cached_input_tokens` to cached input, and `output_tokens` to output. Total is input plus output. `reasoning_output_tokens` is already included in output, so Harness stores it separately as `metadata.reasoningOutputTokens` and never adds it twice.
+
+Accounting is exclusive: model-backed spans record only their own Usage, parent/container spans never copy child totals, and finished non-model actions record zero. Missing Usage sets all token fields to `null` plus `metadata.telemetryComplete = false`; telemetry never changes TODO, acceptance, retry, merge, or validation results.
+
+Use `worklog/logs/lifecycle.jsonl` for per-action duration and token analysis. Run the installed `skills/orchestrator/scripts/codex_runtime.py summary --run-id <id> --lifecycle <path>` entry point to derive run, wave, role, feature, and attempt totals without creating another state file. Use TODO and handoffs—not telemetry—to determine workflow status.
+
+A counted Builder retry starts a new Codex session while preserving the assigned worktree, branch, code, and durable rework handoffs. A valid `needs-rework(context)` repair keeps the same attempt and resumes the same session with `codex exec resume <SESSION_ID>`.
 
 ## Resume, Recovery, And Troubleshooting
 
 | Symptom | Meaning and action |
 | --- | --- |
 | `blocked(harness_not_committed)` | Commit the static/runtime closure and selected feature references, then explicitly run `/harness resume` |
-| Builder `needs-rework(context)` | Orchestrator performs one targeted context repair; repeated identical failure pauses for Owner action |
+| Builder `needs-rework(context)` | Orchestrator resumes the same Builder session for one targeted context repair; repeated identical failure pauses for Owner action |
 | Reviewer `handoff-rejected` | Builder handoff lacks a start command, fixture, expected result, account, or exact review context |
 | Reviewer `failed` | One or more acceptance criteria failed; Orchestrator visibly routes one retry to Builder |
 | `blocked(environment)` | A required observable capability such as browser automation is unavailable; do not substitute code reading |

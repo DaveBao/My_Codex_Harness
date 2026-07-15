@@ -295,6 +295,25 @@ class SkillContractTests(unittest.TestCase):
             self.assertNotIn(f".codex/agents/{role}.toml", text)
         self.assertNotIn("`docs/codex-policy.md`", text)
 
+    def test_codex_runner_contract_uses_exact_tokens_and_deterministic_sessions(self):
+        orchestrator = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        builder = (ROOT / "skills/builder/SKILL.md").read_text(encoding="utf-8")
+        worklog = (ROOT / "scaffold/docs/references/worklog-events.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertTrue((ROOT / "skills/orchestrator/scripts/codex_runtime.py").is_file())
+        self.assertIn("scripts/codex_runtime.py", orchestrator)
+        self.assertRegex(orchestrator, r"(?i)formal retry[^.]*new Builder (?:session|thread)")
+        self.assertRegex(orchestrator, r"(?i)context repair[^.]*codex exec resume")
+        self.assertRegex(orchestrator, r"(?i)exclusive token")
+        self.assertRegex(orchestrator, r"(?i)Runner credential[^.]*environment")
+        self.assertRegex(builder, r"(?i)formal retry[^.]*new session")
+        self.assertRegex(builder, r"(?i)context repair[^.]*same Builder session")
+        for marker in ("exclusive token", "reasoningOutputTokens", "telemetryComplete", "never estimate"):
+            self.assertIn(marker.lower(), worklog.lower())
+        self.assertIn("reasoning_output_tokens", readme)
+        self.assertIn("outer Codex App launcher", readme)
+
     def test_role_skills_resolve_helper_from_active_skill(self):
         for role in ("orchestrator", "builder", "reviewer"):
             text = (ROOT / "skills" / role / "SKILL.md").read_text(encoding="utf-8")
