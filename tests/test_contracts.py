@@ -124,7 +124,9 @@ def tracked_package_text_files(root: Path) -> list[Path]:
     return [
         root / relative
         for relative in result.stdout.split("\0")
-        if relative and Path(relative).suffix.lower() in PACKAGE_TEXT_SUFFIXES
+        if relative
+        and (root / relative).is_file()
+        and Path(relative).suffix.lower() in PACKAGE_TEXT_SUFFIXES
     ]
 
 
@@ -295,24 +297,27 @@ class SkillContractTests(unittest.TestCase):
             self.assertNotIn(f".codex/agents/{role}.toml", text)
         self.assertNotIn("`docs/codex-policy.md`", text)
 
-    def test_codex_runner_contract_uses_exact_tokens_and_deterministic_sessions(self):
+    def test_codex_app_native_roles_do_not_use_cli_runner(self):
         orchestrator = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
         builder = (ROOT / "skills/builder/SKILL.md").read_text(encoding="utf-8")
         worklog = (ROOT / "scaffold/docs/references/worklog-events.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertTrue((ROOT / "skills/orchestrator/scripts/codex_runtime.py").is_file())
-        self.assertIn("scripts/codex_runtime.py", orchestrator)
+        self.assertFalse((ROOT / "skills/orchestrator/scripts/codex_runtime.py").exists())
+        self.assertIn("spawn_agent", orchestrator)
+        self.assertIn("followup_task", orchestrator)
+        self.assertNotIn("codex exec", orchestrator)
+        self.assertNotIn("codex_runtime.py", orchestrator)
         self.assertRegex(orchestrator, r"(?i)formal retry[^.]*new Builder (?:session|thread)")
-        self.assertRegex(orchestrator, r"(?i)context repair[^.]*codex exec resume")
-        self.assertRegex(orchestrator, r"(?i)exclusive token")
-        self.assertRegex(orchestrator, r"(?i)Runner credential[^.]*environment")
+        self.assertRegex(orchestrator, r"(?i)context repair[^.]*followup_task")
         self.assertRegex(builder, r"(?i)formal retry[^.]*new session")
         self.assertRegex(builder, r"(?i)context repair[^.]*same Builder session")
-        for marker in ("exclusive token", "reasoningOutputTokens", "telemetryComplete", "never estimate"):
+        for marker in ("unavailable usage", "null", "never estimate"):
             self.assertIn(marker.lower(), worklog.lower())
-        self.assertIn("reasoning_output_tokens", readme)
-        self.assertIn("outer Codex App launcher", readme)
+        self.assertIn("Codex App", readme)
+        self.assertIn("spawn_agent", readme)
+        self.assertNotIn("codex exec", readme)
+        self.assertNotIn("codex_runtime.py", readme)
 
     def test_role_skills_resolve_helper_from_active_skill(self):
         for role in ("orchestrator", "builder", "reviewer"):
