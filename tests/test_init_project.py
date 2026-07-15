@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,7 @@ class InitProjectTests(unittest.TestCase):
                 ".codex/agents/harness-reviewer.toml",
                 ".codex/agents/harness-librarian.toml",
                 "docs/project-map.md",
+                "docs/codex-policy.md",
                 "docs/product-specs/prd.md",
                 "docs/exec-plans/active/TODO.json",
                 "docs/exec-plans/completed/.gitkeep",
@@ -113,6 +115,29 @@ class InitProjectTests(unittest.TestCase):
                 ["git", "remote"], cwd=target, capture_output=True, text=True, check=True
             )
             self.assertEqual("", remotes.stdout)
+
+    def test_installed_copy_resolves_canonical_plugin_scaffold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed_script = home / ".agents/skills/init-project/scripts/init_project.py"
+            installed_script.parent.mkdir(parents=True)
+            shutil.copy2(SCRIPT, installed_script)
+            canonical_scaffold = home / ".codex/plugins/my-codex-harness/scaffold"
+            shutil.copytree(SCAFFOLD, canonical_scaffold)
+            target = home / "project"
+            target.mkdir()
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+
+            result = subprocess.run(
+                [sys.executable, str(installed_script), "--root", str(target)],
+                capture_output=True,
+                env=env,
+                text=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((target / "docs/codex-policy.md").is_file())
 
     def test_existing_git_repository_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -199,6 +224,7 @@ class InitProjectTests(unittest.TestCase):
             owned = {
                 "AGENTS.md": b"project agents\n",
                 "CLAUDE.md": b"project claude\n",
+                "docs/codex-policy.md": b"project codex policy\n",
                 "docs/project-map.md": b"project map\n",
                 "docs/product-specs/prd.md": b"project prd\n",
                 "docs/exec-plans/active/TODO.json": b'{"features":[{"id":"F1"}]}\n',
@@ -756,6 +782,7 @@ class InitProjectTests(unittest.TestCase):
             ".codex/agents/harness-reviewer.toml",
             ".codex/agents/harness-librarian.toml",
             "docs/project-map.md",
+            "docs/codex-policy.md",
             "docs/product-specs/prd.md",
             "docs/exec-plans/active/TODO.json",
             "docs/exec-plans/completed/.gitkeep",
@@ -781,10 +808,16 @@ class InitProjectTests(unittest.TestCase):
             self.assertNotIn(str(Path.home()), text)
         self.assertEqual(b"", (SCAFFOLD / "worklog/handoffs.jsonl").read_bytes())
         self.assertEqual(b"", (SCAFFOLD / "worklog/logs/lifecycle.jsonl").read_bytes())
+        self.assertIn(
+            "docs/codex-policy.md",
+            (SCAFFOLD / "docs/project-map.md").read_text(encoding="utf-8"),
+        )
 
     def test_skill_documents_project_owned_codex_config_boundary(self):
         skill = (ROOT / "skills/init-project/SKILL.md").read_text()
         self.assertIn("`.codex/config.toml` is project-owned once created", skill)
+        self.assertIn("`docs/codex-policy.md`", skill)
+        self.assertRegex(skill, r"(?i)codex-policy\.md.*project-owned")
 
     def test_scaffold_is_dormant_without_owner_invocation(self):
         text = (SCAFFOLD / "AGENTS.md").read_text(encoding="utf-8")

@@ -15,7 +15,16 @@ from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[3]
-SCAFFOLD = PACKAGE_ROOT / "scaffold"
+
+
+def resolve_scaffold() -> Path:
+    packaged = PACKAGE_ROOT / "scaffold"
+    if packaged.is_dir():
+        return packaged
+    return Path.home() / ".codex/plugins/my-codex-harness/scaffold"
+
+
+SCAFFOLD = resolve_scaffold()
 MANAGED_FILES = {
     ".codex/agents/harness-builder.toml",
     ".codex/agents/harness-librarian.toml",

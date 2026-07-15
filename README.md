@@ -143,7 +143,7 @@ The following is the shortest complete path for a new or existing Git repository
 
    ```sh
    git add AGENTS.md .codex/config.toml .codex/agents/harness-*.toml \
-     docs/project-map.md docs/references/ docs/product-specs/prd.md
+     docs/codex-policy.md docs/project-map.md docs/references/ docs/product-specs/prd.md
    git commit -m "chore: initialize project harness"
    ```
 
@@ -191,7 +191,7 @@ Planning and implementation must not invent materially missing requirements. The
 
 Owner entry: `$init-project`.
 
-`init-project` uses the packaged [scaffold](scaffold/) to create only missing project files. It initializes Git only when no repository exists, preserves project-owned docs and workflow state, and reports `created`, `replaced`, `skipped`, and `conflicts`. `--force` applies only to explicitly managed schemas and runtime adapters; it does not replace the PRD, TODO state, worklogs, evidence, checkpoints, project map, or project guidance.
+`init-project` uses the packaged [scaffold](scaffold/) to create only missing project files, including the project-owned `docs/codex-policy.md`. It initializes Git only when no repository exists, preserves project-owned docs and workflow state, and reports `created`, `replaced`, `skipped`, and `conflicts`. `--force` applies only to explicitly managed schemas and runtime adapters; it does not replace the Codex policy, PRD, TODO state, worklogs, evidence, checkpoints, project map, or project guidance.
 
 Output: a dormant, navigable Harness project.
 

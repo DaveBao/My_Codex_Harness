@@ -295,7 +295,7 @@ class SkillContractTests(unittest.TestCase):
         for role in ("builder", "reviewer", "librarian"):
             self.assertIn(f".codex/agents/harness-{role}.toml", text)
             self.assertNotIn(f".codex/agents/{role}.toml", text)
-        self.assertNotIn("`docs/codex-policy.md`", text)
+        self.assertIn("`docs/codex-policy.md`", text)
 
     def test_codex_app_native_roles_do_not_use_cli_runner(self):
         orchestrator = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")

@@ -11,6 +11,7 @@ This is a navigation index, not a knowledge base. It points agents to the smalle
 ## Entry Points
 
 - `AGENTS.md`: permanent repository invariants.
+- `docs/codex-policy.md`: project-owned Codex writing policy and prerequisite checks.
 - `.codex/config.toml` and `.codex/agents/harness-*.toml`: project runtime settings and prefixed role identities; behavior remains in installed role skills.
 - `docs/product-specs/prd.md`: product requirements input.
 - `docs/exec-plans/active/TODO.json`: active queue, dependencies, status, and attempts.
