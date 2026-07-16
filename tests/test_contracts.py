@@ -552,6 +552,22 @@ class ContextHelperTests(unittest.TestCase):
         self.assertEqual("", result.stdout)
         self.assertRegex(result.stderr, rf"^{name}:")
 
+    def commit_fixture(self, message="fixture"):
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(self.root), "-c", "user.name=Harness Test",
+                "-c", "user.email=harness@example.invalid", "commit", "-qm", message,
+            ],
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
     def test_exact_feature_and_handoff_selection_has_no_sibling_leakage(self):
         result = self.run_helper("feature", "--id", "F1")
         self.assertEqual(0, result.returncode, result.stderr)
@@ -573,6 +589,103 @@ class ContextHelperTests(unittest.TestCase):
         )
         self.assertEqual(0, handoff.returncode, handoff.stderr)
         self.assertEqual(event, json.loads(handoff.stdout))
+
+    def test_assignment_excludes_mutable_history_without_changing_hash(self):
+        feature = {
+            **self.feature,
+            "status": "failed",
+            "attemptCount": 2,
+            "handoffReferences": ["event-1"],
+            "validationHistory": [{"result": "failed"}],
+        }
+        self.write_todo([feature, self.sibling])
+
+        full = self.run_helper("feature", "--id", "F1")
+        assignment = self.run_helper("assignment", "--id", "F1")
+
+        self.assertEqual(0, full.returncode, full.stderr)
+        self.assertEqual(0, assignment.returncode, assignment.stderr)
+        value = json.loads(assignment.stdout)
+        self.assertEqual("F1", value["feature"]["id"])
+        self.assertEqual(["works"], value["feature"]["acceptanceCriteria"])
+        for field in ("status", "attemptCount", "handoffReferences", "validationHistory"):
+            self.assertNotIn(field, value["feature"])
+        self.assertEqual(
+            json.loads(full.stdout)["featureSpecSha256"],
+            value["featureSpecSha256"],
+        )
+        self.assertNotIn("Sibling secret", assignment.stdout)
+
+    def test_markdown_section_is_verbatim_hash_addressed_and_bounded(self):
+        project_map = self.root / "docs/project-map.md"
+        project_map.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            "# Project Map\n\n"
+            "## Entry Points\nentry\n\n"
+            "## Transaction Events\nbody\n"
+            "### Tests\nnested\n\n"
+            "## Next Domain\nnext\n"
+        )
+        project_map.write_text(content, encoding="utf-8")
+        base_sha = self.commit_fixture()
+
+        result = self.run_helper(
+            "section",
+            "--reference", "docs/project-map.md#transaction-events",
+            "--base-sha", base_sha,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        section = json.loads(result.stdout)
+        expected = "## Transaction Events\nbody\n### Tests\nnested\n\n"
+        self.assertEqual("docs/project-map.md#transaction-events", section["reference"])
+        self.assertEqual(expected, section["content"])
+        self.assertEqual(len(expected.encode("utf-8")), section["byteCount"])
+        self.assertEqual(hashlib.sha256(content.encode("utf-8")).hexdigest(), section["fileSha256"])
+        self.assertEqual("section", section["mode"])
+
+        fallback = self.run_helper(
+            "section",
+            "--reference", "docs/project-map.md#entry-points",
+            "--base-sha", base_sha,
+            "--legacy-full-fallback",
+        )
+        self.assertEqual(0, fallback.returncode, fallback.stderr)
+        fallback_value = json.loads(fallback.stdout)
+        self.assertEqual(content, fallback_value["content"])
+        self.assertEqual("full_fallback", fallback_value["mode"])
+
+    def test_markdown_section_rejects_missing_duplicate_unsafe_and_drifted_references(self):
+        project_map = self.root / "docs/project-map.md"
+        project_map.parent.mkdir(parents=True, exist_ok=True)
+        project_map.write_text(
+            "# Map\n## Cash Events!\none\n## Cash Events\ntwo\n",
+            encoding="utf-8",
+        )
+        base_sha = self.commit_fixture()
+
+        self.assert_failure(
+            3, "NOT_FOUND", "section",
+            "--reference", "docs/project-map.md#missing",
+            "--base-sha", base_sha,
+        )
+        self.assert_failure(
+            4, "DUPLICATE_ID", "section",
+            "--reference", "docs/project-map.md#cash-events",
+            "--base-sha", base_sha,
+        )
+        self.assert_failure(
+            9, "UNSAFE_PATH", "section",
+            "--reference", "../outside.md#anything",
+            "--base-sha", base_sha,
+        )
+
+        project_map.write_text("# Map\n## Cash Events\ndrifted\n", encoding="utf-8")
+        self.assert_failure(
+            7, "FEATURE_HASH_MISMATCH", "section",
+            "--reference", "docs/project-map.md#cash-events",
+            "--base-sha", base_sha,
+        )
 
     def test_context_helper_rejects_identity_hash_outcome_debug_duplicates_and_malformed_data(self):
         selected = self.run_helper("feature", "--id", "F1")

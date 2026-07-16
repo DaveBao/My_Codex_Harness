@@ -9,7 +9,7 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
 
@@ -25,6 +25,7 @@ MUTABLE_FEATURE_FIELDS = {
     "validationHistory",
 }
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
 EXIT_CODES = {
     "INVALID_INVOCATION": 2,
@@ -144,15 +145,18 @@ def canonical_json(value: Any) -> bytes:
     return rendered.encode("utf-8")
 
 
-def feature_hash(feature: dict[str, Any]) -> str:
-    projection = {
+def immutable_feature(feature: dict[str, Any]) -> dict[str, Any]:
+    return {
         key: value
         for key, value in feature.items()
         if key not in MUTABLE_FEATURE_FIELDS
     }
+
+
+def feature_hash(feature: dict[str, Any]) -> str:
     digest = hashlib.sha256()
     digest.update(FEATURE_SPEC_PREFIX)
-    digest.update(canonical_json(projection))
+    digest.update(canonical_json(immutable_feature(feature)))
     return digest.hexdigest()
 
 
@@ -241,6 +245,99 @@ def select_handoff(
     return selected
 
 
+def parse_reference(raw_reference: str) -> tuple[str, str]:
+    if raw_reference.count("#") != 1:
+        fail("INVALID_INVOCATION", "reference must contain one path anchor")
+    raw_path, anchor = raw_reference.split("#", 1)
+    relative = PurePosixPath(raw_path)
+    if (
+        not raw_path
+        or not anchor
+        or relative.is_absolute()
+        or "\\" in raw_path
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        fail("UNSAFE_PATH", "reference path or anchor is unsafe")
+    return relative.as_posix(), anchor
+
+
+def committed_file_bytes(root: Path, base_sha: str, relative: str) -> bytes:
+    if COMMIT_SHA_RE.fullmatch(base_sha) is None:
+        fail("INVALID_INVOCATION", "base SHA must be lowercase hexadecimal")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", f"{base_sha}:{relative}"],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        fail("NOT_FOUND", "referenced file is absent from the base commit")
+    return result.stdout
+
+
+def normalize_anchor(text: str) -> str:
+    value = text.strip().lower()
+    value = re.sub(r"[^\w\- ]", "", value, flags=re.UNICODE)
+    return value.replace(" ", "-")
+
+
+def select_markdown_section(
+    root: Path,
+    raw_reference: str,
+    base_sha: str,
+    legacy_full_fallback: bool,
+) -> dict[str, Any]:
+    relative, anchor = parse_reference(raw_reference)
+    candidate = resolve_fixed_file(root, Path(relative))
+    live = candidate.read_bytes()
+    if committed_file_bytes(root, base_sha, relative) != live:
+        fail("FEATURE_HASH_MISMATCH", "referenced file bytes differ from the base commit")
+    try:
+        text = live.decode("utf-8")
+    except UnicodeError:
+        fail("MALFORMED_DATA", "referenced Markdown must be UTF-8")
+
+    digest = hashlib.sha256(live).hexdigest()
+    if legacy_full_fallback:
+        return {
+            "anchor": anchor,
+            "byteCount": len(live),
+            "content": text,
+            "fileSha256": digest,
+            "mode": "full_fallback",
+            "path": relative,
+            "reference": raw_reference,
+        }
+
+    headings: list[tuple[int, int, str]] = []
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        match = re.match(r"^(#{1,6})[ \t]+(.+?)[ \t]*(?:#+[ \t]*)?(?:\r?\n)?$", line)
+        if match:
+            headings.append((index, len(match.group(1)), normalize_anchor(match.group(2))))
+    matches = [heading for heading in headings if heading[2] == anchor]
+    if not matches:
+        fail("NOT_FOUND", "Markdown anchor was not found")
+    if len(matches) != 1:
+        fail("DUPLICATE_ID", "Markdown anchor is not unique")
+
+    start, level, _ = matches[0]
+    end = next(
+        (index for index, candidate_level, _ in headings if index > start and candidate_level <= level),
+        len(lines),
+    )
+    content = "".join(lines[start:end])
+    return {
+        "anchor": anchor,
+        "byteCount": len(content.encode("utf-8")),
+        "content": content,
+        "fileSha256": digest,
+        "mode": "section",
+        "path": relative,
+        "reference": raw_reference,
+    }
+
+
 def build_parser() -> ContextArgumentParser:
     parser = ContextArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(
@@ -254,12 +351,23 @@ def build_parser() -> ContextArgumentParser:
     feature.add_argument("--id", required=True)
     feature.add_argument("--expected-sha256")
 
+    assignment = subparsers.add_parser("assignment")
+    assignment.add_argument("--control-root", required=True)
+    assignment.add_argument("--id", required=True)
+    assignment.add_argument("--expected-sha256")
+
     handoff = subparsers.add_parser("handoff")
     handoff.add_argument("--control-root", required=True)
     handoff.add_argument("--event-id", required=True)
     handoff.add_argument("--feature-id", required=True)
     handoff.add_argument("--expected-feature-sha256", required=True)
     handoff.add_argument("--require-outcome")
+
+    section = subparsers.add_parser("section")
+    section.add_argument("--control-root", required=True)
+    section.add_argument("--reference", required=True)
+    section.add_argument("--base-sha", required=True)
+    section.add_argument("--legacy-full-fallback", action="store_true")
     return parser
 
 
@@ -278,11 +386,14 @@ def main() -> int:
     try:
         args = build_parser().parse_args()
         root = resolve_control_root(args.control_root)
-        if args.command == "feature":
+        if args.command in {"feature", "assignment"}:
             if not args.id:
                 fail("INVALID_INVOCATION", "feature ID must not be empty")
-            emit(select_feature(root, args.id, args.expected_sha256))
-        else:
+            selected = select_feature(root, args.id, args.expected_sha256)
+            if args.command == "assignment":
+                selected["feature"] = immutable_feature(selected["feature"])
+            emit(selected)
+        elif args.command == "handoff":
             if not args.event_id or not args.feature_id:
                 fail("INVALID_INVOCATION", "event and feature IDs must not be empty")
             emit(
@@ -292,6 +403,15 @@ def main() -> int:
                     args.feature_id,
                     args.expected_feature_sha256,
                     args.require_outcome,
+                )
+            )
+        else:
+            emit(
+                select_markdown_section(
+                    root,
+                    args.reference,
+                    args.base_sha,
+                    args.legacy_full_fallback,
                 )
             )
         return 0
