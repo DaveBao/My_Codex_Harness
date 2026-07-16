@@ -739,6 +739,238 @@ class ContextHelperTests(unittest.TestCase):
             self.assertFalse(try_create_symlink(self.base / "link", self.base / "target"))
 
 
+class ControlHelperTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "main"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        (self.root / "docs/references").mkdir(parents=True)
+        (self.root / "docs/references/lifecycle-event.schema.json").write_bytes(
+            (ROOT / "schemas/lifecycle-event.schema.json").read_bytes()
+        )
+        (self.root / "worklog/logs").mkdir(parents=True)
+        (self.root / "worklog/logs/lifecycle.jsonl").write_text("", encoding="utf-8")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    @property
+    def helper(self):
+        return ROOT / "skills/orchestrator/scripts/harness_control.py"
+
+    def run_helper(self, *args, root=None):
+        return subprocess.run(
+            [sys.executable, str(self.helper), args[0], "--control-root", str(root or self.root), *args[1:]],
+            capture_output=True,
+            text=True,
+        )
+
+    def read_events(self):
+        return [
+            json.loads(line)
+            for line in (self.root / "worklog/logs/lifecycle.jsonl").read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+
+    def assert_failure_without_lifecycle_write(self, code, name, *args, root=None):
+        lifecycle = self.root / "worklog/logs/lifecycle.jsonl"
+        before = lifecycle.read_bytes()
+        result = self.run_helper(*args, root=root)
+        self.assertEqual(code, result.returncode, result.stderr)
+        self.assertEqual("", result.stdout)
+        self.assertRegex(result.stderr, rf"^{name}:")
+        self.assertEqual(before, lifecycle.read_bytes())
+        return result
+
+    def commit_fixture(self):
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git", "-C", str(self.root), "-c", "user.name=Harness Test",
+                "-c", "user.email=harness@example.invalid", "commit", "-qm", "fixture",
+            ],
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def test_lifecycle_start_and_finish_are_schema_valid_and_measured(self):
+        started = self.run_helper(
+            "lifecycle-start",
+            "--run-id", "run-1",
+            "--wave-id", "wave-1",
+            "--feature-id", "F1",
+            "--feature-name", "Feature one",
+            "--parent-span-id", "parent-1",
+            "--actor", "builder",
+            "--action", "implement_feature",
+            "--model", "gpt-5.6",
+            "--reasoning-effort", "high",
+            "--token-mode", "app-role",
+            "--metadata-json", '{"attemptNumber":1}',
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        start_result = json.loads(started.stdout)
+
+        finished = self.run_helper(
+            "lifecycle-finish",
+            "--span-id", start_result["spanId"],
+            "--status", "succeeded",
+            "--outcome", "ready-for-review",
+            "--metadata-json", '{"attemptNumber":1}',
+        )
+        self.assertEqual(0, finished.returncode, finished.stderr)
+        finish_result = json.loads(finished.stdout)
+
+        events = self.read_events()
+        self.assertEqual(2, len(events))
+        schema = json.loads((ROOT / "schemas/lifecycle-event.schema.json").read_text(encoding="utf-8"))
+        for event in events:
+            assert_schema_valid(self, schema, event)
+        self.assertEqual("started", events[0]["phase"])
+        self.assertEqual("finished", events[1]["phase"])
+        self.assertEqual(start_result["spanId"], finish_result["spanId"])
+        self.assertEqual(events[0]["spanId"], events[1]["spanId"])
+        self.assertEqual({"input": None, "cachedInput": None, "output": None, "total": None}, events[1]["tokens"])
+        self.assertGreaterEqual(events[1]["durationMs"], 0)
+        self.assertEqual(events[1]["durationMs"], finish_result["durationMs"])
+
+    def test_lifecycle_rejects_invalid_missing_and_closed_spans_without_writing(self):
+        self.assert_failure_without_lifecycle_write(
+            6, "IDENTITY_MISMATCH", "lifecycle-start",
+            "--run-id", "run-1", "--feature-id", "F1",
+            "--actor", "builder", "--action", "implement_feature",
+        )
+        self.assert_failure_without_lifecycle_write(
+            2, "INVALID_INVOCATION", "lifecycle-start",
+            "--run-id", "run-1", "--actor", "invalid", "--action", "run",
+        )
+        self.assert_failure_without_lifecycle_write(
+            3, "NOT_FOUND", "lifecycle-finish",
+            "--span-id", "missing", "--status", "succeeded",
+        )
+
+        started = self.run_helper(
+            "lifecycle-start", "--run-id", "run-1",
+            "--actor", "orchestrator", "--action", "run",
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        span_id = json.loads(started.stdout)["spanId"]
+        finished = self.run_helper(
+            "lifecycle-finish", "--span-id", span_id,
+            "--status", "succeeded", "--outcome", "completed",
+        )
+        self.assertEqual(0, finished.returncode, finished.stderr)
+        self.assert_failure_without_lifecycle_write(
+            4, "DUPLICATE_ID", "lifecycle-finish",
+            "--span-id", span_id, "--status", "succeeded",
+        )
+
+    def test_lifecycle_rejects_invalid_terminal_error_without_writing(self):
+        started = self.run_helper(
+            "lifecycle-start", "--run-id", "run-1",
+            "--actor", "orchestrator", "--action", "run",
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        span_id = json.loads(started.stdout)["spanId"]
+        self.assert_failure_without_lifecycle_write(
+            10, "MALFORMED_DATA", "lifecycle-finish",
+            "--span-id", span_id, "--status", "failed", "--error-json", "{}",
+        )
+
+    def test_lifecycle_rejects_malformed_duplicate_and_symlinked_logs_without_writing(self):
+        lifecycle = self.root / "worklog/logs/lifecycle.jsonl"
+        lifecycle.write_text("not-json\n", encoding="utf-8")
+        self.assert_failure_without_lifecycle_write(
+            10, "MALFORMED_DATA", "lifecycle-start",
+            "--run-id", "run-1", "--actor", "orchestrator", "--action", "run",
+        )
+
+        lifecycle.write_text("", encoding="utf-8")
+        started = self.run_helper(
+            "lifecycle-start", "--run-id", "run-1",
+            "--actor", "orchestrator", "--action", "run",
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        line = lifecycle.read_text(encoding="utf-8")
+        lifecycle.write_text(line + line, encoding="utf-8")
+        span_id = json.loads(started.stdout)["spanId"]
+        self.assert_failure_without_lifecycle_write(
+            4, "DUPLICATE_ID", "lifecycle-finish",
+            "--span-id", span_id, "--status", "succeeded",
+        )
+
+        external = Path(self.temporary.name) / "external.jsonl"
+        external.write_text("external\n", encoding="utf-8")
+        lifecycle.unlink()
+        if not try_create_symlink(lifecycle, external):
+            self.skipTest("symlink creation is unavailable")
+        result = self.run_helper(
+            "lifecycle-start", "--run-id", "run-1",
+            "--actor", "orchestrator", "--action", "run",
+        )
+        self.assertEqual(9, result.returncode, result.stderr)
+        self.assertRegex(result.stderr, r"^UNSAFE_PATH:")
+        self.assertEqual(b"external\n", external.read_bytes())
+
+    def test_preflight_accepts_committed_closure_and_rejects_drift(self):
+        files = {
+            "AGENTS.md": "# Agents\n",
+            "docs/codex-policy.md": "# Policy\n",
+            "docs/references/builder-handoff.schema.json": "{}\n",
+            "docs/references/worklog-events.md": "# Events\n",
+            ".codex/config.toml": "[agents]\nmax_threads = 4\n",
+            ".codex/agents/harness-builder.toml": 'name = "builder"\n',
+            ".codex/agents/harness-reviewer.toml": 'name = "reviewer"\n',
+            ".codex/agents/harness-librarian.toml": 'name = "librarian"\n',
+            "docs/project-map.md": "# Map\n",
+        }
+        for relative, content in files.items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        base_sha = self.commit_fixture()
+
+        result = self.run_helper(
+            "preflight", "--base-sha", base_sha, "--runtime", "codex",
+            "--reference", "docs/project-map.md#map",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        value = json.loads(result.stdout)
+        self.assertEqual(base_sha, value["baseSha"])
+        self.assertIn("docs/project-map.md", value["checkedPaths"])
+        self.assertGreater(value["checkedBytes"], 0)
+
+        (self.root / "docs/project-map.md").write_text("# Drifted\n", encoding="utf-8")
+        self.assert_failure_without_lifecycle_write(
+            11, "HARNESS_NOT_COMMITTED", "preflight",
+            "--base-sha", base_sha, "--runtime", "codex",
+            "--reference", "docs/project-map.md#map",
+        )
+
+    def test_preflight_rejects_missing_unsafe_and_unknown_runtime(self):
+        base_sha = self.commit_fixture()
+        self.assert_failure_without_lifecycle_write(
+            11, "HARNESS_NOT_COMMITTED", "preflight",
+            "--base-sha", base_sha, "--runtime", "codex",
+            "--reference", "docs/missing.md#missing",
+        )
+        self.assert_failure_without_lifecycle_write(
+            9, "UNSAFE_PATH", "preflight",
+            "--base-sha", base_sha, "--runtime", "codex",
+            "--reference", "../outside.md#outside",
+        )
+        self.assert_failure_without_lifecycle_write(
+            2, "INVALID_INVOCATION", "preflight",
+            "--base-sha", base_sha, "--runtime", "unknown",
+        )
+
+
 class ResidueTests(unittest.TestCase):
     def assert_no_package_residue(self):
         files = tracked_package_text_files(ROOT)
