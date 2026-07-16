@@ -179,6 +179,14 @@ class InstallTests(unittest.TestCase):
                 )
             for skill in sorted(path.name for path in (ROOT / "skills").iterdir() if path.is_dir()):
                 self.assertTrue((home / ".agents/skills" / skill).exists(), skill)
+            for name in ("harness_context.py", "harness_control.py"):
+                relative = Path("skills/orchestrator/scripts") / name
+                source = ROOT / relative
+                canonical = package / relative
+                discovered = home / ".agents/skills/orchestrator/scripts" / name
+                self.assertEqual(source.read_bytes(), canonical.read_bytes())
+                self.assertEqual(source.read_bytes(), discovered.read_bytes())
+                self.assertTrue(canonical.stat().st_mode & 0o111)
             config = (home / ".codex/config.toml").read_text()
             for key, value in DESIRED_AGENTS.items():
                 rendered = str(value).lower() if isinstance(value, bool) else str(value)

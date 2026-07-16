@@ -111,6 +111,8 @@ class InitProjectTests(unittest.TestCase):
             self.assertTrue((target / ".git").exists())
             self.assertEqual(b"", (target / "worklog/handoffs.jsonl").read_bytes())
             self.assertEqual(b"", (target / "worklog/logs/lifecycle.jsonl").read_bytes())
+            self.assertFalse((target / "skills/orchestrator/scripts/harness_context.py").exists())
+            self.assertFalse((target / "skills/orchestrator/scripts/harness_control.py").exists())
             remotes = subprocess.run(
                 ["git", "remote"], cwd=target, capture_output=True, text=True, check=True
             )

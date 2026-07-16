@@ -199,6 +199,12 @@ class BundleTests(unittest.TestCase):
             self.assertIn("sourceCommit", manifest)
             self.assertEqual(DESIRED_AGENTS, manifest["desiredAgents"])
             self.assertTrue(manifest["files"])
+            for name in ("harness_context.py", "harness_control.py"):
+                relative = f"skills/orchestrator/scripts/{name}"
+                self.assertEqual(
+                    hashlib.sha256((ROOT / relative).read_bytes()).hexdigest(),
+                    manifest["files"][relative],
+                )
 
     def test_doctor_validates_complex_toml_with_stdlib_tomllib(self):
         doctor = load_doctor()

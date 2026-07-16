@@ -199,7 +199,7 @@ Output: a dormant, navigable Harness project.
 
 Owner entry: `$to-exec-plan`.
 
-`to-exec-plan` reads the approved PRD and limited project navigation, then writes narrow Builder-ready features to `docs/exec-plans/active/TODO.json`. Each feature contains identity, goal, allowed and forbidden scope, assumptions, constraints, acceptance criteria, validation, explicit references, dependencies, expected wave, and conflict risk.
+`to-exec-plan` reads the approved PRD and limited project navigation, then writes narrow Builder-ready features to `docs/exec-plans/active/TODO.json`. Each feature contains identity, goal, allowed and forbidden scope, assumptions, constraints, acceptance criteria, validation, explicit references, dependencies, expected wave, and conflict risk. New references target the narrowest existing authoritative heading; `docs/project-map.md#entry-points` is not used as a universal placeholder, and missing navigation is reported instead of invented.
 
 The planner validates that dependencies exist and are acyclic. It preserves mutable history when replanning. Human approval is required before full execution.
 
@@ -213,10 +213,10 @@ Orchestrator allocates the run identity and validates:
 - the Codex runtime closure uses `.codex/agents/harness-builder.toml`, `harness-reviewer.toml`, and `harness-librarian.toml`;
 - the selected feature's `docs/project-map.md` and explicit references are committed and unchanged;
 - active TODO and worklog state exists, parses, and is writable;
-- the installed Orchestrator, Builder, Reviewer, Librarian, and context helper are readable;
+- the installed Orchestrator, Builder, Reviewer, Librarian, context helper, and control helper are readable;
 - selected features are dependency-ready and have no declared write or runtime conflict.
 
-Preflight blocks with `harness_not_committed` instead of sending incomplete or dirty context into a worktree.
+The dependency-free `skills/orchestrator/scripts/harness_control.py` performs the byte-for-byte committed-closure preflight. It blocks with `harness_not_committed` instead of sending incomplete or dirty context into a worktree; it does not select features, judge outcomes, update TODO state, manage worktrees, or launch roles.
 
 ### 6. Wave selection and isolated worktrees
 
@@ -228,7 +228,9 @@ Orchestrator owns worktree creation and cleanup. Builder never chooses its workt
 
 Delegated role: `builder`.
 
-Builder accepts exactly one activation-envelope assignment and loads only that feature, its exact handoff events, `docs/project-map.md`, and explicit references. For behavior changes and bug fixes it uses red-to-green tests at the acceptance criterion's public seam when practical. It writes scoped implementation and tests, validates them, commits locally, and returns a normalized handoff with:
+Builder accepts exactly one activation-envelope assignment. `harness_context.py assignment` returns the immutable feature definition and canonical hash without mutable history or siblings. Builder then loads only exact handoff event IDs and exact Markdown sections selected by committed `path#anchor` references. A legacy generic reference may explicitly fall back to the complete file; a new missing, duplicate, unsafe, or drifted anchor fails closed. Authoritative text is returned verbatim with its full-file hash, never replaced by a generated summary.
+
+For behavior changes and bug fixes Builder uses red-to-green tests at the acceptance criterion's public seam when practical. It writes scoped implementation and tests, validates them, commits locally, and returns a normalized handoff with:
 
 - feature identity and immutable feature-spec hash;
 - branch, worktree, base and commit identities;
@@ -263,7 +265,7 @@ Reviewer does not modify product code or implementation tests.
 
 ### 10. Merge and global validation
 
-Orchestrator validates the Reviewer verdict, merges passed feature commits serially, then runs project-wide validation. A feature becomes `passed` only after review, merge, and global validation all succeed.
+Orchestrator validates the Reviewer verdict, merges passed feature commits serially, then runs project-wide validation. A feature becomes `passed` only after review, merge, and global validation all succeed. Immediate safe progression means that, in the same active turn, Orchestrator closes the role span, validates and persists the result, and starts the next approval-free operation; it does not pause merely to wait for another Owner message.
 
 Merge or global-validation failure preserves evidence and counts one failed delivery only after the integration base can be restored safely. If safe restoration cannot be proved, Orchestrator checkpoints and pauses.
 
@@ -378,7 +380,7 @@ Lifecycle telemetry and checkpoints support decisions but never override `TODO.j
 
 ## Timing And Token Telemetry
 
-Each tracked run, wave, role invocation, merge, validation, retry, context repair, checkpoint, pause, and resume receives a unique `spanId`. Orchestrator writes one `started` and one terminal `finished` lifecycle event. The two persisted timestamps define the interval; the finished event contains measured `durationMs`.
+Each tracked run, wave, role invocation, merge, validation, retry, context repair, checkpoint, pause, and resume receives a unique `spanId`. During an explicitly activated run, `harness_control.py lifecycle-start` and `lifecycle-finish` append one validated `started` and one terminal `finished` event. The helper derives measured `durationMs` from the persisted start timestamp and rejects malformed, duplicate, missing, already-closed, or unsafe spans without partial writes.
 
 Role results use this telemetry shape before Orchestrator validates and persists it:
 
@@ -403,6 +405,8 @@ Time is measured, not guessed. Token fields use runtime-provided usage only. Whe
 For Codex App, Orchestrator invokes Builder, Reviewer, and Librarian as native child tasks with `spawn_agent`; Harness does not launch Codex CLI processes. These child tasks remain visible in the App. Formal Builder retries start a new child task, while a context repair continues the same Builder task with `followup_task`.
 
 Codex App does not currently expose per-role official Usage to Orchestrator. App-native role spans therefore keep measured duration but store all token fields as `null`, with `metadata.telemetryComplete = false` and `metadata.telemetryReason = "app_usage_unavailable"`; Harness never estimates token usage. Telemetry never changes TODO, acceptance, retry, merge, or validation results.
+
+For regression testing only, Harness uses a deterministic proxy metric named `harness_controlled_context_bytes`. It counts role contracts, immutable assignments, exact source sections, selected handoffs, Builder policy, and bounded helper responses; it is not an official token count. The F002-shaped six-role fixture is fixed at a 106,483-byte observed baseline and currently measures 69,832 bytes after exact-context selection, a 34.42% reduction. Tests require no more than 74,538 bytes while preserving three Builder/Reviewer rounds and review outcomes `failed`, `failed`, `passed`.
 
 Use `worklog/logs/lifecycle.jsonl` for per-action duration analysis. Use TODO and handoffs—not telemetry—to determine workflow status.
 
@@ -513,7 +517,7 @@ python3 -m unittest discover -s tests -v
 git diff --check
 ```
 
-The suite validates plugin and marketplace metadata, skill and role contracts, upstream provenance, schemas, context selection, project initialization, installation ownership, rollback, uninstall, reproducible bundles, offline installation, and README links. It does not call a paid model.
+The suite validates plugin and marketplace metadata, skill and role contracts, upstream provenance, schemas, exact context selection, the deterministic efficiency benchmark, project initialization, installation ownership, rollback, uninstall, reproducible bundles, offline installation, and README links. It does not call a paid model.
 
 Build and validate a release bundle with:
 

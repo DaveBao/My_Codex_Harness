@@ -82,6 +82,13 @@ class PackageContractTests(unittest.TestCase):
             self.assertIn(command, text)
         self.assertIn("durationMs", text)
         self.assertRegex(text, r"(?i)token.*null|null.*token")
+        for marker in (
+            "harness_control.py",
+            "exact Markdown sections",
+            "deterministic proxy metric",
+            "immediate safe progression",
+        ):
+            self.assertIn(marker.lower(), text.lower())
         self.assertNotIn("`/run`", text)
 
         for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", text):
@@ -89,6 +96,23 @@ class PackageContractTests(unittest.TestCase):
                 continue
             path = target.split("#", 1)[0]
             self.assertTrue((ROOT / path).exists(), f"broken README link: {target}")
+
+    def test_orchestrator_helpers_are_tracked_executable_python_files(self):
+        tracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        for name in ("harness_context.py", "harness_control.py"):
+            with self.subTest(name=name):
+                relative = f"skills/orchestrator/scripts/{name}"
+                path = ROOT / relative
+                self.assertTrue(path.is_file())
+                self.assertFalse(path.is_symlink())
+                self.assertTrue(path.stat().st_mode & 0o111)
+                self.assertIn(relative, tracked)
+                self.assertTrue(path.read_bytes().startswith(b"#!/usr/bin/env python3\n"))
 
     def test_plugin_manifest_contract(self):
         path = ROOT / ".codex-plugin/plugin.json"
