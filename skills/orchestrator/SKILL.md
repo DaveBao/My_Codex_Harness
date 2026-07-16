@@ -13,7 +13,7 @@ At start or resume, allocate a non-empty `harnessRunId`, retain the exact `activ
 
 Run dependency-ready feature waves to quiescence. Do not write business code or make acceptance judgments.
 
-Resolve `orchestratorSkillRoot` as the absolute directory of the active orchestrator skill. Set `harnessContext` to the absolute path `$orchestratorSkillRoot/scripts/harness_context.py`; do not assume a repository-local skill path. Resolve the active Builder, Reviewer, and Librarian skills through Codex skill discovery.
+Resolve `orchestratorSkillRoot` as the absolute directory of the active orchestrator skill. Set `harnessContext` and `harnessControl` to the absolute paths `$orchestratorSkillRoot/scripts/harness_context.py` and `$orchestratorSkillRoot/scripts/harness_control.py`; do not assume a repository-local skill path. Resolve the active Builder, Reviewer, and Librarian skills through Codex skill discovery.
 
 ## Inputs
 - `docs/project-map.md`
@@ -28,9 +28,17 @@ For formal input, ready-for-review selection, resume, retry, and context lookup,
 The maximum attempts per feature is 3 failed deliveries. Count attempts only at the single transition back to Builder; never count both the originating failure and its rework routing.
 
 ## Worklog Ownership
-During an active run, Orchestrator is the single writer for root `worklog/handoffs.jsonl` and `worklog/logs/lifecycle.jsonl`. Load the lifecycle schema `docs/references/lifecycle-event.schema.json` once per run or resume, compile one validator, and reuse that validator for every lifecycle event appended during that run. Load `docs/references/worklog-events.md` at the same time. Do not reread or duplicate either reference per event.
+During an active run, Orchestrator is the single writer for root `worklog/handoffs.jsonl` and `worklog/logs/lifecycle.jsonl`. Read `docs/references/worklog-events.md` once per run or resume. Use the control helper, rather than constructing lifecycle JSON manually, around every run, wave, role invocation, merge, validation, context repair, and checkpoint:
 
-Allocate `eventId` when appending each JSONL event; it is unique per event. Allocate one unique `spanId` per tracked action and use it for its started/finished pair. `parentSpanId` is `null` for a root span or references an existing parent span; siblings may share it. For every feature action, retain the immutable `featureId` and `featureName` title snapshot. Before each run, wave, role invocation, merge, validation, context repair, and checkpoint, append its `started` lifecycle event; append exactly one matching terminal `finished` event with measured `durationMs`. Use runtime token usage only, with unavailable counts set to `null`; never estimate.
+```bash
+python3 "$harnessControl" lifecycle-start \
+  --control-root "$controlRoot" --run-id "$harnessRunId" \
+  --actor "$actor" --action "$action" --token-mode "$tokenMode"
+python3 "$harnessControl" lifecycle-finish \
+  --control-root "$controlRoot" --span-id "$spanId" --status "$status"
+```
+
+Pass the returned `spanId` to the matching finish command. The helper enforces unique event IDs, one open start, one terminal finish, schema identity, and measured `durationMs`. Supply immutable feature ID/name and the parent span when applicable. Use runtime token usage only; unavailable counts remain `null` and are never estimated.
 
 Use exclusive token accounting: container spans never copy child tokens and non-model local actions record zero tokens. Codex App native subagents do not expose per-role official Usage to Orchestrator, so persist all role token fields as `null`, set `metadata.telemetryComplete = false`, and use bounded reason `app_usage_unavailable`; never estimate. Missing Usage is telemetry-only and never changes TODO, acceptance, retry, merge, or validation outcomes.
 
@@ -50,13 +58,20 @@ For an Orchestrator-owned debug run, persist returned handoff and lifecycle obje
 
 ## Worktree Lifecycle
 - Orchestrator owns worktree creation, assignment, verification, and cleanup. Builder never chooses or creates its worktree.
-- Record the integrated base SHA before creating work. The project static committed closure is `AGENTS.md`, `docs/codex-policy.md`, `docs/references/builder-handoff.schema.json`, `docs/references/lifecycle-event.schema.json`, and `docs/references/worklog-events.md`. The installed role closure is the active Orchestrator, Builder, Reviewer, and Librarian skills plus the resolved absolute context helper; require all five files to be readable before dispatch.
+- Record the integrated base SHA before creating work. The project static committed closure is `AGENTS.md`, `docs/codex-policy.md`, `docs/references/builder-handoff.schema.json`, `docs/references/lifecycle-event.schema.json`, and `docs/references/worklog-events.md`. The installed role closure is the active Orchestrator, Builder, Reviewer, and Librarian skills plus both resolved helpers; require all six files to be readable before dispatch.
 - Add exactly one selected runtime closure:
   - Codex: `.codex/config.toml`, `.codex/agents/harness-builder.toml`, `.codex/agents/harness-reviewer.toml`, and `.codex/agents/harness-librarian.toml`.
   - Claude: `CLAUDE.md`, `.claude/commands/run.md`, `.claude/agents/builder.md`, `.claude/agents/reviewer.md`, and `.claude/agents/librarian.md`.
   - Another runtime: its explicit Orchestrator entry point and Builder, Reviewer, and Librarian adapters.
-- For every project static committed closure and selected runtime closure path, run `git cat-file -e "<baseSha>:<path>"`, then compare `git hash-object --path="$path" "$path"` with `git rev-parse "$baseSha:$path"`. Absence or different content returns `blocked(harness_not_committed)` before spawning Builder.
-- The wave context closure is `docs/project-map.md` plus the selected feature's explicit references. Normalize each path to a repository-relative POSIX path, reject paths that escape the repository, and apply the same `baseSha` existence and content-equality checks before dispatch. This ensures the assigned worktree receives the disclosed context for that wave.
+- Preflight the fixed project/runtime closure, all selected feature references, and the six installed paths in one bounded command before dispatch:
+
+```bash
+python3 "$harnessControl" preflight \
+  --control-root "$controlRoot" --base-sha "$baseSha" --runtime "$runtime" \
+  --reference "$reference" --installed-path "$installedPath"
+```
+
+Repeat `--reference` and `--installed-path` as needed. The helper rejects missing, unsafe, or byte-drifted committed context with `HARNESS_NOT_COMMITTED`; checkpoint and return `blocked(harness_not_committed)` before spawning Builder. Never bypass the check or substitute summaries for committed source bytes.
 - Live mutable workflow state is `docs/exec-plans/active/TODO.json`, `worklog/handoffs.jsonl`, `worklog/logs/lifecycle.jsonl`, and `worklog/checkpoints/`. Validate it only in the main integration tree for existence, parseability, and required writability. Never compare live mutable state with the base SHA or include it in a feature worktree's runtime closure.
 - Use branch `feature/<featureId>-<slug>` and path `.worktrees/<featureId>-<slug>`. Create new work with `git worktree add -b <branch> <path> <baseSha>`; for a valid retry or resume, reuse the recorded worktree or recreate it with `git worktree add <path> <branch>`.
 - Bind one feature ID, branch, path, base SHA, and Builder thread in the checkpoint. Never assign a path or branch to two features.
@@ -78,18 +93,18 @@ For an Orchestrator-owned debug run, persist returned handoff and lifecycle obje
 
 In Codex App, invoke every Builder, Reviewer, and Librarian as an App-native child task with `spawn_agent`; include the resolved role skill and the bounded reference assignment in its message. Do not launch Codex CLI processes from Harness. A formal retry always calls `spawn_agent` for a new Builder session/thread while reusing the recorded worktree and branch. Context repair is the only path that calls `followup_task` for the same Builder task.
 
-Every role assignment includes the activation envelope `harnessRunId`, `activatedByOwner: true`, and `activationCommand` in addition to its existing role-specific reference fields. The Builder reference assignment otherwise contains only `featureId`, immutable `featureName`, `featureSpecSha256`, exact relevant `handoffEventIds`, assigned `spanId`, `controlRoot`, `branch`, `worktree`, and `baseSha`. The Reviewer reference assignment otherwise contains only `featureId`, immutable `featureName`, the same `featureSpecSha256`, one exact persisted `handoffEventId`, assigned `spanId`, and `controlRoot`. In both packets, `controlRoot` is the absolute main integration worktree root, not a feature worktree. Do not embed feature, AC, handoff, project-map, or explicit-reference bodies in either assignment. Do not include sibling feature IDs. Roles return their assigned `spanId`, never an `eventId`.
+Every role assignment includes the activation envelope `harnessRunId`, `activatedByOwner: true`, and `activationCommand` in addition to its existing role-specific reference fields. The Builder reference assignment otherwise contains only `featureId`, immutable `featureName`, `featureSpecSha256`, exact relevant `handoffEventIds`, assigned `spanId`, `controlRoot`, `branch`, `worktree`, and `baseSha`. The Reviewer reference assignment otherwise contains only `featureId`, immutable `featureName`, the same `featureSpecSha256`, one exact persisted `handoffEventId`, assigned `spanId`, `controlRoot`, and `baseSha`. In both packets, `controlRoot` is the absolute main integration worktree root, not a feature worktree. Do not embed feature, AC, handoff, project-map, or explicit-reference bodies in either assignment. Do not include sibling feature IDs. Roles return their assigned `spanId`, never an `eventId`.
 
 The resolved active orchestrator skill helper at `scripts/harness_context.py` is the only authority for feature selection, handoff selection, canonicalization, and `featureSpecSha256`. Invoke its absolute path to create an assignment:
 
 ```bash
-python3 "$harnessContext" feature \
+python3 "$harnessContext" assignment \
   --control-root "$controlRoot" --id "$featureId"
 ```
 
-Use the returned `harness-featurespec-v1` hash for the Builder assignment. Before persisting a Builder handoff or dispatching Reviewer, verify the feature and exact handoff by running the same helper with `--expected-sha256`, or `handoff` with `--event-id`, `--feature-id`, `--expected-feature-sha256`, and for Reviewer input `--require-outcome ready-for-review`. Never implement canonicalization separately in a role.
+Use the returned immutable assignment and `harness-featurespec-v1` hash for both roles. Each role resolves only the assignment's exact references with the helper `section` command and its assigned `baseSha`; legacy generic references may use explicit full-file fallback. Before persisting a Builder handoff or dispatching Reviewer, verify the assignment and exact handoff by running the same helpers with the expected hash and event ID. Never implement canonicalization separately in a role.
 
-When Builder or Reviewer reports a helper failure, require `{ reasonCategory: "context_resolution", helperCode, helperExitCode }` and re-run the same helper check before routing. Builder `NOT_FOUND` routes through the existing context repair without consuming an attempt. Reviewer `NOT_FOUND` routes to `handoff-rejected`. Codes 2 and 4-10 indicate harness or state integrity failure: checkpoint, notify the owner, and pause without consuming a feature attempt. Do not parse free-form stderr to choose a route; use the symbolic code and numeric exit code after rechecking.
+When Builder or Reviewer reports a helper failure, require `{ reasonCategory: "context_resolution", helperCode, helperExitCode }` and re-run the same helper check before routing. Builder `NOT_FOUND` routes through the existing context repair without consuming an attempt. Reviewer `NOT_FOUND` routes to `handoff-rejected`. Codes 2 and 4-11 indicate harness or state integrity failure: checkpoint, notify the owner, and pause without consuming a feature attempt. Do not parse free-form stderr to choose a route; use the symbolic code and numeric exit code after rechecking.
 
 For Builder and Reviewer, validate the allocated `spanId`, feature ID/name, `featureSpecSha256`, telemetry shape, timestamp and measured duration, outcome, and applicable branch, worktree, and commit SHA. Validate every `ready-for-review` Builder result against `docs/references/builder-handoff.schema.json` before persisting it, changing status to `ready-for-review`, or spawning Reviewer. Structural failure returns Builder rework with reason `handoff`; Reviewer still decides whether structurally valid content is sufficient for fair acceptance. For Librarian, validate the allocated `spanId`, telemetry/report shape, merged commit identity, bounded merged feature ID/name list, and duplicate-candidate shape; do not apply branch, worktree, or single-feature checks. On success, wrap the role result, allocate the durable handoff `eventId`, append it to `worklog/handoffs.jsonl`, and allocate the terminal lifecycle `eventId` before appending it.
 
@@ -129,4 +144,6 @@ After every wave, atomically replace `worklog/checkpoints/orchestrator.json`. In
 At a safe wave boundary, inspect real runtime context usage when available. At 100,000 tokens or above, do not start another wave; set context status to `paused_context`, checkpoint, and notify the owner to compact before resuming. Never infer context size from lifecycle data. If unavailable, keep checkpointing and rely on native compaction.
 
 ## Stop
+After any role result, in the same active turn finish its span, validate and persist the result, then start the next approval-free safe operation. Do not wait for another Owner message between Builder handoff, Reviewer, merge, global validation, cleanup, Librarian, checkpoint, or the next dependency-ready wave.
+
 Pause only for `blocked(retry_exhausted)`, terminal blocker, owner decision, spec gap, unavailable dependency/environment, unsafe operation, or context maintenance. Otherwise continue to quiescence.

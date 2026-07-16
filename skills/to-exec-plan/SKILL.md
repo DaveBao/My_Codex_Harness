@@ -31,6 +31,8 @@ Do not write source, tests, migrations, unrelated product docs, the PRD, `worklo
 ## TODO JSON Format
 `docs/exec-plans/active/TODO.json` is the source of truth. Each feature contains `id`, `title`, `status`, `attemptCount`, `blockedBy`, `expectedWave`, `conflictRisk`, `goal`, scoped allowed/not-allowed changes, assumptions, constraints, acceptance criteria, validation, and explicit references. Avoid file-by-file instructions unless a path is a confirmed contract.
 
+For every new feature, reference the narrowest existing authoritative section: a specific project-map domain heading, concrete PRD decision or test heading, and only confirmed stable code/contract entry paths. Do not use `docs/project-map.md#entry-points` as a universal placeholder. If no precise project-map section exists, preserve the concrete product/contract references and report a navigation gap for Librarian follow-up instead of inventing a heading.
+
 The only workflow-mutable top-level feature fields are `status`, `attemptCount`, `handoffReferences`, and `validationHistory`. Every other top-level field is feature-definition input to `featureSpecSha256`; adding or changing one invalidates prior assignments. New mutable state requires an explicit helper-contract version change, not an ad hoc field.
 
 ## Replanning Rules

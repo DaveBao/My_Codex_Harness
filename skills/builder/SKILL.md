@@ -21,10 +21,20 @@ Missing, multiple, or mismatched assignments return `needs-rework(context)` befo
 Resolve `orchestratorSkillRoot` as the absolute directory of the active orchestrator skill. Set `harnessContext` to the absolute path `$orchestratorSkillRoot/scripts/harness_context.py`; do not assume a repository-local skill path. Use that helper as the only sanctioned path to the selected feature:
 
 ```bash
-python3 "$harnessContext" feature \
+python3 "$harnessContext" assignment \
   --control-root "$controlRoot" --id "$featureId" \
   --expected-sha256 "$featureSpecSha256"
 ```
+
+Resolve every exact `path#anchor` reference returned by that immutable assignment with:
+
+```bash
+python3 "$harnessContext" section \
+  --control-root "$controlRoot" --reference "$reference" \
+  --base-sha "$baseSha"
+```
+
+Use `--legacy-full-fallback` only for a legacy generic reference that cannot safely select a section. Missing, duplicate, unsafe, or byte-drifted exact references require context repair; never silently omit them or substitute a generated summary.
 
 Load each assigned handoff event in assignment order with:
 
@@ -39,7 +49,7 @@ Do not pass `--require-outcome`; Builder may receive formal rework or context ev
 
 On helper failure, stop before implementation and return `needs-rework(context)` with `{ reasonCategory: "context_resolution", helperCode, helperExitCode }`. Do not translate or suppress the helper code; Orchestrator rechecks it and decides whether context repair or a harness-integrity pause applies.
 
-Then start with that feature, its exact handoffs, and `docs/project-map.md` in the assigned worktree. Open only its explicit references and directly relevant source/test entry points; follow imports or callers one step at a time when needed. Ask Orchestrator for targeted context repair when required navigation is missing. Treat `controlRoot` as read-only.
+Then start with the immutable assignment, exact resolved sections, and exact handoffs. Open only directly relevant source/test entry points in the assigned worktree; follow imports or callers one step at a time when needed. Ask Orchestrator for targeted context repair when required navigation is missing. Treat `controlRoot` as read-only.
 
 Do not read the whole TODO, sibling feature blocks, all docs, completed archives, unrelated logs, or repository history for background.
 

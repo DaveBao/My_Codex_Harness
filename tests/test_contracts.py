@@ -327,6 +327,43 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn("scripts/harness_context.py", text)
             self.assertNotIn(".agents/skills/orchestrator", text)
 
+    def test_optimized_role_contracts_use_bounded_helpers(self):
+        orchestrator = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        builder = (ROOT / "skills/builder/SKILL.md").read_text(encoding="utf-8")
+        reviewer = (ROOT / "skills/reviewer/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("scripts/harness_control.py", orchestrator)
+        for command in ("preflight", "lifecycle-start", "lifecycle-finish"):
+            self.assertIn(f"$harnessControl\" {command}", orchestrator)
+        self.assertRegex(orchestrator, r"(?i)same active turn.*next.*safe operation")
+
+        for role, text in (("Builder", builder), ("Reviewer", reviewer)):
+            with self.subTest(role=role):
+                self.assertIn('$harnessContext" assignment', text)
+                self.assertIn('$harnessContext" section', text)
+                self.assertIn('$harnessContext" handoff', text)
+                self.assertNotIn('$harnessContext" feature', text)
+
+    def test_optimized_contracts_retain_no_drift_gates(self):
+        orchestrator = (ROOT / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        builder = (ROOT / "skills/builder/SKILL.md").read_text(encoding="utf-8")
+        reviewer = (ROOT / "skills/reviewer/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("spawn_agent", orchestrator)
+        self.assertRegex(orchestrator, r"(?i)formal retry[^.]*new Builder (?:session|thread)")
+        self.assertRegex(orchestrator, r"(?i)context repair[^.]*followup_task")
+        self.assertRegex(orchestrator, r"(?i)Reviewer `passed`.*merge.*global validation")
+        self.assertRegex(builder, r"(?i)formal retry[^.]*new session")
+        self.assertRegex(builder, r"(?i)context repair[^.]*same Builder session")
+        self.assertRegex(reviewer, r"(?i)every AC requires real evidence")
+        self.assertRegex(reviewer, r"(?i)must not use generic file reads.*TODO\.json.*handoffs\.jsonl")
+
+    def test_planner_requires_narrow_authoritative_references(self):
+        planner = (ROOT / "skills/to-exec-plan/SKILL.md").read_text(encoding="utf-8")
+        self.assertRegex(planner, r"(?i)narrowest existing authoritative section")
+        self.assertRegex(planner, r"(?i)do not use `docs/project-map\.md#entry-points` as a universal placeholder")
+        self.assertRegex(planner, r"(?i)report a navigation gap")
+
     def test_reviewer_evidence_location_is_control_root_only(self):
         text = (ROOT / "skills/reviewer/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("$controlRoot/worklog/evidence/<feature-id>/", text)
