@@ -286,7 +286,7 @@ git commit -m "docs: ship optimized harness workflow"
 PY=/Users/zhiqibao/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
 $PY -m unittest discover -s tests -v
 $PY scripts/validate_package.py
-$PY scripts/doctor.py --source .
+$PY scripts/doctor.py
 ```
 
 Expected: zero failures and successful package/doctor reports.
