@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "features": [
+    {
+      "id": "F002",
+      "title": "股票账户现金与持仓闭环",
+      "status": "passed",
+      "attemptCount": 2,
+      "blockedBy": [],
+      "expectedWave": 1,
+      "conflictRisk": [
+        "共享账户余额聚合逻辑",
+        "交易与分红事件共同影响现金"
+      ],
+      "goal": "在单一券商股票账户下分别展示多币种现金和证券持仓，并让买卖、费用、税费、分红和股息形成可核验的资金与持仓变动。",
+      "scope": {
+        "allowed": [
+          "股票账户现金分项",
+          "证券持仓分项",
+          "买入、卖出、分红、股息事件",
+          "账户详情页及相关测试"
+        ],
+        "notAllowed": [
+          "一个券商建立多个股票账户",
+          "自动获取实时行情",
+          "修改非股票账户的账本语义"
+        ]
+      },
+      "assumptions": [
+        "每个券商当前只允许一个股票账户",
+        "港股通用人民币结算，但持仓成本按港币展示",
+        "跨币种入金显式记录换汇结果"
+      ],
+      "constraints": [
+        "现金与持仓必须分别核算",
+        "Reviewer 必须逐项验证用户可见结果",
+        "不得以遥测结果改变业务状态"
+      ],
+      "acceptanceCriteria": [
+        "股票账户详情同时显示按币种拆分的现金余额和按证券拆分的持仓数量与成本。",
+        "买入会减少结算现金并增加持仓，卖出会减少持仓并增加扣除费用后的结算现金。",
+        "现金分红和股息进入对应币种现金，不直接改变持仓数量。",
+        "人民币购买港股通证券时保留人民币结算事实，并按成交港币金额显示持仓成本。",
+        "现有非股票账户页面和验证保持通过。"
+      ],
+      "validation": [
+        "运行股票账户领域测试",
+        "运行前端类型检查与构建",
+        "Reviewer 在浏览器中完成买入、卖出和分红流程",
+        "合并后运行项目级验证"
+      ],
+      "references": [
+        "docs/project-map.md#stock-account-events"
+      ],
+      "handoffReferences": [
+        "builder-1",
+        "reviewer-1",
+        "builder-2",
+        "reviewer-2",
+        "builder-3",
+        "reviewer-3"
+      ],
+      "validationHistory": [
+        {"round": 1, "outcome": "failed", "reason": "卖出费用未计入现金"},
+        {"round": 2, "outcome": "failed", "reason": "人民币港股通成本币种错误"},
+        {"round": 3, "outcome": "passed", "reason": "全部验收标准有独立证据"}
+      ]
+    }
+  ]
+}
