@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
+# Installed copy-mode skill directories are ownership-hashed. Import without
+# leaving an unowned __pycache__ that would block the next safe upgrade.
+sys.dont_write_bytecode = True
 from harness_context import HarnessContextError, resolve_control_root, resolve_fixed_file
 
 

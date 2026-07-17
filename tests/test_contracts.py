@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1009,6 +1010,25 @@ class ControlHelperTests(unittest.TestCase):
             2, "INVALID_INVOCATION", "preflight",
             "--base-sha", base_sha, "--runtime", "unknown",
         )
+
+    def test_installed_control_helper_does_not_write_bytecode_beside_itself(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scripts = Path(directory) / "scripts"
+            scripts.mkdir()
+            for name in ("harness_context.py", "harness_control.py"):
+                shutil.copy2(ROOT / "skills/orchestrator/scripts" / name, scripts / name)
+            environment = os.environ.copy()
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+
+            result = subprocess.run(
+                [sys.executable, str(scripts / "harness_control.py"), "--help"],
+                capture_output=True,
+                env=environment,
+                text=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((scripts / "__pycache__").exists())
 
 
 class ResidueTests(unittest.TestCase):
