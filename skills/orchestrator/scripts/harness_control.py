@@ -226,7 +226,7 @@ def committed_bytes(root: Path, base_sha: str, relative: str) -> bytes:
 
 def preflight(args: argparse.Namespace, root: Path) -> dict[str, Any]:
     paths = sorted(set((*STATIC_CLOSURE, *RUNTIME_CLOSURES[args.runtime], *args.reference)))
-    normalized = [normalized_project_path(path) for path in paths]
+    normalized = sorted({normalized_project_path(path) for path in paths})
     checked_bytes = 0
     for relative in normalized:
         try:

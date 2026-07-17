@@ -976,11 +976,14 @@ class ControlHelperTests(unittest.TestCase):
         result = self.run_helper(
             "preflight", "--base-sha", base_sha, "--runtime", "codex",
             "--reference", "docs/project-map.md#map",
+            "--reference", "docs/project-map.md#another-anchor",
+            "--reference", "AGENTS.md#safety",
         )
         self.assertEqual(0, result.returncode, result.stderr)
         value = json.loads(result.stdout)
         self.assertEqual(base_sha, value["baseSha"])
         self.assertIn("docs/project-map.md", value["checkedPaths"])
+        self.assertEqual(len(value["checkedPaths"]), len(set(value["checkedPaths"])))
         self.assertGreater(value["checkedBytes"], 0)
 
         (self.root / "docs/project-map.md").write_text("# Drifted\n", encoding="utf-8")
